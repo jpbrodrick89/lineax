@@ -218,7 +218,7 @@ def _linear_solve_jvp(primals, tangents):
                 tmp,
                 options_conj_transpose,  # pyright: ignore
                 solver,
-                True,
+                False,
             )
             vecs.append(tmp)
 
@@ -230,7 +230,7 @@ def _linear_solve_jvp(primals, tangents):
                 solution,
                 options_conj_transpose,  # pyright: ignore
                 solver,
-                True,
+                False,
             )
             tmp2 = t_operator_conj_transpose.mv(tmp1)  # pyright: ignore
             # tmp2 is the y term
@@ -242,7 +242,7 @@ def _linear_solve_jvp(primals, tangents):
     vecs = jtu.tree_map(_sum, *vecs)
     # the A^ term at the very beginning
     sol, _, _ = eqxi.filter_primitive_bind(
-        linear_solve_p, operator, state, vecs, options, solver, True
+        linear_solve_p, operator, state, vecs, options, solver, False
     )
     sols.append(sol)
     t_solution = jtu.tree_map(_sum, *sols)
@@ -292,7 +292,7 @@ def _linear_solve_transpose(inputs, cts_out):
         cts_solution,
         options_transpose,
         solver,
-        True,  # throw=True unconditionally: nowhere to pipe result to.
+        False,  # throw=True unconditionally: nowhere to pipe result to.
     )
     cts_vector = jtu.tree_map(
         _keep_undefined, vector, cts_vector, is_leaf=_is_undefined
