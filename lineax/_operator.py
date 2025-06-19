@@ -1325,7 +1325,23 @@ def _(operator):
         eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
     )
     eye = jnp.eye(flat.size, dtype=flat.dtype)
-    jac = jax.vmap(lambda x: operator.fn(unravel(x)), out_axes=-1)(eye)
+    jac = jax.tree.transpose(
+        jax.tree.structure(["*"] * flat.size),
+        jax.tree.structure(operator.out_structure()),
+        [operator.fn(unravel(x)) for x in eye],
+    )
+
+    def is_list_of_floats(leaf):
+        if isinstance(leaf, list):
+            try:
+                _ = jnp.stack(leaf, axis=-1)
+                return True
+            except (ValueError, TypeError):
+                return False
+        else:
+            return False
+
+    jac = jax.tree.map(ft.partial(jnp.stack, axis=-1), jac, is_leaf=is_list_of_floats)
 
     def batch_unravel(x):
         assert x.ndim > 0
@@ -1335,6 +1351,7 @@ def _(operator):
         return unravel_(x)
 
     jac = jtu.tree_map(batch_unravel, jac)
+
     return PyTreeLinearOperator(jac, operator.out_structure(), operator.tags)
 
 
