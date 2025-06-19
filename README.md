@@ -13,6 +13,8 @@ Features include:
 - Support for both real-valued and complex-valued inputs;
 - All the benefits of working with JAX: autodiff, autoparallelism, GPU/TPU support, etc.
 
+This particular branch of `lineax` (`jpb/novmap`) adds support for `FunctionLinearOperators` without batching rules. This is useful if trying to perform a Newton solve of a primitive whose JVP rule does not have a batching rule as the JVP will be used in linearising the function and constructing the `FunctionLinearOperator` and then vmapped on materialisation. The alternative method offered here will often be less efficient than implementing a batching rule, however, if a batching rule exists the original behaviour is retained and no performance sacrifice will be experienced.
+
 ## Installation
 
 ```bash
