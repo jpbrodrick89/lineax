@@ -61,12 +61,39 @@ class Tridiagonal(AbstractLinearSolver[_TridiagonalState]):
         del state, options
         vector = ravel_vector(vector, packed_structures)
 
-        solution = lax.linalg.tridiagonal_solve(
-            jnp.append(0.0, lower_diagonal),
-            diagonal,
-            jnp.append(upper_diagonal, 0.0),
-            vector[:, None],
-        ).flatten()
+        #
+        # notation from: https://en.wikipedia.org/wiki/Tridiagonal_matrix_algorithm
+        # _p indicates prime, ie. `d_p` is the variable name for d' on wikipedia
+        #
+
+        size = len(diagonal)
+
+        def thomas_scan(prev_cd_carry, bd):
+            c_p, d_p, step = prev_cd_carry
+            # the index of `a` doesn't matter at step 0 as
+            # we won't use it at all. Same for `c` at final step
+            a_index = jnp.where(step > 0, step - 1, 0)
+            c_index = jnp.where(step < size, step, 0)
+
+            b, d = bd
+            a, c = lower_diagonal[a_index], upper_diagonal[c_index]
+            denom = b - a * c_p
+            new_d_p = (d - a * d_p) / denom
+            new_c_p = c / denom
+            return (new_c_p, new_d_p, step + 1), (new_c_p, new_d_p)
+
+        def backsub(prev_x_carry, cd_p):
+            x_prev, step = prev_x_carry
+            c_p, d_p = cd_p
+            x_new = d_p - c_p * x_prev
+            return (x_new, step + 1), x_new
+
+        # not a dummy init! 0 is the proper value for all of these
+        init_thomas = (0, 0, 0)
+        init_backsub = (0, 0)
+        diag_vec = (diagonal, vector)
+        _, cd_p = lax.scan(thomas_scan, init_thomas, diag_vec, unroll=1)
+        _, solution = lax.scan(backsub, init_backsub, cd_p, reverse=True, unroll=1)
 
         solution = unravel_solution(solution, packed_structures)
         return solution, RESULTS.successful, {}
