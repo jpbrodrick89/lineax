@@ -143,12 +143,11 @@ def _linear_solve_jvp(primals, tangents):
     jtu.tree_map(_assert_false, (t_state, t_options, t_solver, t_throw))
     del t_state, t_options, t_solver, t_throw
 
-    # Check what tangents exist
-    has_vector_tangent = any(
-        t is not None for t in jtu.tree_leaves(t_vector, is_leaf=_is_none)
-    )
-    has_operator_tangent = any(
-        t is not None for t in jtu.tree_leaves(t_operator, is_leaf=_is_none)
+    # Note that we pass throw=True unconditionally to all the tangent solves, as there
+    # is nowhere we can pipe their error to.
+    # This is the primal solve so we can respect the original `throw`.
+    solution, result, stats = eqxi.filter_primitive_bind(
+        linear_solve_p, operator, state, vector, options, solver, throw
     )
 
     #
@@ -186,102 +185,67 @@ def _linear_solve_jvp(primals, tangents):
     #
     # x' = A^(-A'x + b')
 
-    # Special case: only vector tangent exists (no operator tangent)
-    # In this case, x' = A^b', so we can batch the primal and tangent solves
-    if has_vector_tangent and not has_operator_tangent:
-        # Materialize zeros in tangent vector
-        t_vector_mat = jtu.tree_map(
-            eqxi.materialise_zeros, vector, t_vector, is_leaf=_is_none
+    vecs = []
+    sols = []
+    if any(t is not None for t in jtu.tree_leaves(t_vector, is_leaf=_is_none)):
+        # b' term
+        vecs.append(
+            jtu.tree_map(eqxi.materialise_zeros, vector, t_vector, is_leaf=_is_none)
         )
-        # Stack [b, b'] along a new leading axis
-        batched_vector = jtu.tree_map(
-            lambda v, tv: jnp.stack([v, tv], axis=0),
-            vector,
-            t_vector_mat,
-        )
-        # Batched solve: A^-1 [b, b'] = [x, x']
-        # Note that we pass throw=True unconditionally to all the tangent solves, as
-        # there is nowhere we can pipe their error to. This is the primal solve so we
-        # can respect the original `throw`.
-        batched_solution, result, stats = jax.vmap(
-            lambda v: eqxi.filter_primitive_bind(
-                linear_solve_p, operator, state, v, options, solver, throw
+    if any(t is not None for t in jtu.tree_leaves(t_operator, is_leaf=_is_none)):
+        t_operator = TangentLinearOperator(operator, t_operator)
+        t_operator = linearise(t_operator)  # optimise for matvecs
+        # -A'x term
+        vec = (-(t_operator.mv(solution) ** ω)).ω
+        vecs.append(vec)
+        allow_dependent_rows = solver.allow_dependent_rows(operator)
+        allow_dependent_columns = solver.allow_dependent_columns(operator)
+        if allow_dependent_rows or allow_dependent_columns:
+            operator_conj_transpose = conj(operator).transpose()
+            t_operator_conj_transpose = conj(t_operator).transpose()
+            state_conj, options_conj = solver.conj(state, options)
+            state_conj_transpose, options_conj_transpose = solver.transpose(
+                state_conj, options_conj
             )
-        )(batched_vector)
-        # Extract primal (index 0) and tangent (index 1) solutions
-        solution = jtu.tree_map(lambda x: x[0], batched_solution)
-        t_solution = jtu.tree_map(lambda x: x[1], batched_solution)
-    else:
-        # General case: operator tangent exists, use current implementation
-        # Note that we pass throw=True unconditionally to all the tangent solves, as
-        # there is nowhere we can pipe their error to. This is the primal solve so we
-        # can respect the original `throw`.
-        solution, result, stats = eqxi.filter_primitive_bind(
-            linear_solve_p, operator, state, vector, options, solver, throw
-        )
-
-        vecs = []
-        sols = []
-        if has_vector_tangent:
-            # b' term
-            vecs.append(
-                jtu.tree_map(eqxi.materialise_zeros, vector, t_vector, is_leaf=_is_none)
+        if allow_dependent_rows:
+            lst_sqr_diff = (vector**ω - operator.mv(solution) ** ω).ω
+            tmp = t_operator_conj_transpose.mv(lst_sqr_diff)  # pyright: ignore
+            tmp, _, _ = eqxi.filter_primitive_bind(
+                linear_solve_p,
+                operator_conj_transpose,  # pyright: ignore
+                state_conj_transpose,  # pyright: ignore
+                tmp,
+                options_conj_transpose,  # pyright: ignore
+                solver,
+                True,
             )
-        if has_operator_tangent:
-            t_operator = TangentLinearOperator(operator, t_operator)
-            t_operator = linearise(t_operator)  # optimise for matvecs
-            # -A'x term
-            vec = (-(t_operator.mv(solution) ** ω)).ω
-            vecs.append(vec)
-            allow_dependent_rows = solver.allow_dependent_rows(operator)
-            allow_dependent_columns = solver.allow_dependent_columns(operator)
-            if allow_dependent_rows or allow_dependent_columns:
-                operator_conj_transpose = conj(operator).transpose()
-                t_operator_conj_transpose = conj(t_operator).transpose()
-                state_conj, options_conj = solver.conj(state, options)
-                state_conj_transpose, options_conj_transpose = solver.transpose(
-                    state_conj, options_conj
-                )
-            if allow_dependent_rows:
-                lst_sqr_diff = (vector**ω - operator.mv(solution) ** ω).ω
-                tmp = t_operator_conj_transpose.mv(lst_sqr_diff)  # pyright: ignore
-                tmp, _, _ = eqxi.filter_primitive_bind(
-                    linear_solve_p,
-                    operator_conj_transpose,  # pyright: ignore
-                    state_conj_transpose,  # pyright: ignore
-                    tmp,
-                    options_conj_transpose,  # pyright: ignore
-                    solver,
-                    True,
-                )
-                vecs.append(tmp)
+            vecs.append(tmp)
 
-            if allow_dependent_columns:
-                tmp1, _, _ = eqxi.filter_primitive_bind(
-                    linear_solve_p,
-                    operator_conj_transpose,  # pyright: ignore
-                    state_conj_transpose,  # pyright:ignore
-                    solution,
-                    options_conj_transpose,  # pyright: ignore
-                    solver,
-                    True,
-                )
-                tmp2 = t_operator_conj_transpose.mv(tmp1)  # pyright: ignore
-                # tmp2 is the y term
-                tmp3 = operator.mv(tmp2)
-                tmp4 = (-(tmp3**ω)).ω
-                # tmp4 is the Ay term
-                vecs.append(tmp4)
-                sols.append(tmp2)
-        vecs = jtu.tree_map(_sum, *vecs)
-        # the A^ term at the very beginning
-        sol, _, _ = eqxi.filter_primitive_bind(
-            linear_solve_p, operator, state, vecs, options, solver, True
-        )
-        sols.append(sol)
-        t_solution = jtu.tree_map(_sum, *sols)
+        if allow_dependent_columns:
+            tmp1, _, _ = eqxi.filter_primitive_bind(
+                linear_solve_p,
+                operator_conj_transpose,  # pyright: ignore
+                state_conj_transpose,  # pyright:ignore
+                solution,
+                options_conj_transpose,  # pyright: ignore
+                solver,
+                True,
+            )
+            tmp2 = t_operator_conj_transpose.mv(tmp1)  # pyright: ignore
+            # tmp2 is the y term
+            tmp3 = operator.mv(tmp2)
+            tmp4 = (-(tmp3**ω)).ω
+            # tmp4 is the Ay term
+            vecs.append(tmp4)
+            sols.append(tmp2)
+    vecs = jtu.tree_map(_sum, *vecs)
+    # the A^ term at the very beginning
+    sol, _, _ = eqxi.filter_primitive_bind(
+        linear_solve_p, operator, state, vecs, options, solver, True
+    )
+    sols.append(sol)
+    t_solution = jtu.tree_map(_sum, *sols)
 
-    # Common exit for both batched and non-batched paths
     out = solution, result, stats
     t_out = (
         t_solution,
