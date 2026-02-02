@@ -2051,7 +2051,6 @@ def _(operator):
 @materialise.register(ComposedLinearOperator)
 def _(operator):
     # If the first operator has aux, preserve it on the result
-    # (aux on first operator makes sense as output comes from op1)
     if isinstance(operator.operator1, AuxLinearOperator):
         aux = operator.operator1.aux
         inner_composed = operator.operator1.operator @ operator.operator2
