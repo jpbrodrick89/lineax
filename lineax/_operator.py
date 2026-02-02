@@ -2064,7 +2064,6 @@ def _(operator):
 @diagonal.register(ComposedLinearOperator)
 def _(operator):
     if is_diagonal(operator):
-        # For diagonal operators: diag(A @ B) = diag(A) * diag(B)
         return diagonal(operator.operator1) * diagonal(operator.operator2)
     return jnp.diag(operator.as_matrix())
 
