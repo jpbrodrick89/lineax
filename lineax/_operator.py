@@ -1189,16 +1189,25 @@ class ComposedLinearOperator(AbstractLinearOperator):
             return self.operator2.as_matrix()
         if isinstance(self.operator2, IdentityLinearOperator):
             return self.operator1.as_matrix()
-        # If all operators in the composition tree can be cheaply materialised,
-        # collect their matrices and use multi_dot, which automatically selects
-        # the optimal multiplication order (important for non-square chains).
-        matrices = _try_collect_matrices(self)
-        if matrices is not None:
-            return jnp.linalg.multi_dot(matrices, precision=lax.Precision.HIGHEST)
-        # Fallback: operator1 is expensive to materialise (e.g. FunctionLinearOperator
-        # or JacobianLinearOperator) but has an efficient mv.  Apply it column-wise to
-        # the materialised operator2 via vmap, avoiding any O(n) forward-pass budget
-        # on operator1.
+        # Evaluate each side independently so that a cheaply-collected side is
+        # always exploited, even when the other side is expensive.
+        left = _try_collect_matrices(self.operator1)
+        right = _try_collect_matrices(self.operator2)
+        # If the right side cannot be collected cheaply, fall back to a single
+        # as_matrix() call so we always have a concrete matrix list for it.
+        right_mats = right if right is not None else [self.operator2.as_matrix()]
+        if left is not None:
+            # operator1 is cheap: combine both sides with multi_dot, which picks
+            # the optimal multiplication order for non-square chains.
+            return jnp.linalg.multi_dot(left + right_mats, precision=lax.Precision.HIGHEST)
+        # operator1 is expensive (e.g. FunctionLinearOperator /
+        # JacobianLinearOperator) but has an efficient mv.  Collapse the right
+        # side to a single matrix, then apply operator1.mv column-wise via vmap.
+        right_mat = (
+            right_mats[0]
+            if len(right_mats) == 1
+            else jnp.linalg.multi_dot(right_mats, precision=lax.Precision.HIGHEST)
+        )
         _, unravel = eqx.filter_eval_shape(
             jfu.ravel_pytree, self.operator1.in_structure()
         )
@@ -1207,7 +1216,7 @@ class ComposedLinearOperator(AbstractLinearOperator):
             out = self.operator1.mv(unravel(v))
             return jfu.ravel_pytree(out)[0]
 
-        return jax.vmap(mv_flat, in_axes=1, out_axes=1)(self.operator2.as_matrix())
+        return jax.vmap(mv_flat, in_axes=1, out_axes=1)(right_mat)
 
     def transpose(self):
         return self.operator2.transpose() @ self.operator1.transpose()
