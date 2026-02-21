@@ -1160,6 +1160,20 @@ class ComposedLinearOperator(AbstractLinearOperator):
             raise ValueError("Incompatible linear operator structures")
 
     def mv(self, vector):
+        mats = _try_collect_matrices(self)
+        if mats is not None:
+            # All operators in the chain are dense: include v as the final
+            # element so multi_dot picks the optimal contraction order.  Under
+            # jax.vmap over `vector` the batch dimension propagates through the
+            # chain automatically, equivalent to multi_dot([...mats..., V]).
+            v_flat, _ = jfu.ravel_pytree(vector)
+            result_flat = jnp.linalg.multi_dot(
+                mats + [v_flat], precision=lax.Precision.HIGHEST
+            )
+            _, unravel_out = eqx.filter_eval_shape(
+                jfu.ravel_pytree, self.out_structure()
+            )
+            return unravel_out(result_flat)
         return self.operator1.mv(self.operator2.mv(vector))
 
     def as_matrix(self):
@@ -1167,25 +1181,11 @@ class ComposedLinearOperator(AbstractLinearOperator):
             return self.operator2.as_matrix()
         if isinstance(self.operator2, IdentityLinearOperator):
             return self.operator1.as_matrix()
-        # Evaluate each side independently so that a cheaply-collected side is
-        # always exploited, even when the other side is expensive.
-        left = _try_collect_matrices(self.operator1)
-        right = _try_collect_matrices(self.operator2)
-        # If the right side cannot be collected cheaply, fall back to a single
-        # as_matrix() call so we always have a concrete matrix list for it.
-        right_mats = right if right is not None else [self.operator2.as_matrix()]
-        if left is not None:
-            # operator1 is cheap: combine both sides with multi_dot, which picks
-            # the optimal multiplication order for non-square chains.
-            return jnp.linalg.multi_dot(left + right_mats, precision=lax.Precision.HIGHEST)
-        # operator1 is expensive (e.g. FunctionLinearOperator /
-        # JacobianLinearOperator) but has an efficient mv.  Collapse the right
-        # side to a single matrix, then apply operator1.mv column-wise via vmap.
-        right_mat = (
-            right_mats[0]
-            if len(right_mats) == 1
-            else jnp.linalg.multi_dot(right_mats, precision=lax.Precision.HIGHEST)
-        )
+        # Materialise the right side, then apply operator1.mv column-by-column
+        # via vmap.  When operator1 (or any sub-chain) is fully dense, its mv
+        # uses multi_dot internally, so the vmap is equivalent to
+        # multi_dot([left_mats..., right_mat]) without any special-casing here.
+        right_mat = self.operator2.as_matrix()
         _, unravel = eqx.filter_eval_shape(
             jfu.ravel_pytree, self.operator1.in_structure()
         )
