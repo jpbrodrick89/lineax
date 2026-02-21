@@ -26,6 +26,7 @@ from ._operator import (
     FunctionLinearOperator as FunctionLinearOperator,
     has_unit_diagonal as has_unit_diagonal,
     IdentityLinearOperator as IdentityLinearOperator,
+    is_dense as is_dense,
     is_diagonal as is_diagonal,
     is_lower_triangular as is_lower_triangular,
     is_negative_semidefinite as is_negative_semidefinite,

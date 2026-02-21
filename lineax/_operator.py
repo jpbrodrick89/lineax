@@ -1114,28 +1114,6 @@ class DivLinearOperator(AbstractLinearOperator):
         return self.operator.out_structure()
 
 
-def _is_cheap_to_materialize(op: AbstractLinearOperator) -> bool:
-    """True for operators where `as_matrix()` is cheap AND the resulting dense matmul
-    is not worse than applying the operator's specialized `mv` column-by-column.
-
-    Excluded (despite having cheap-ish `as_matrix()`): `IdentityLinearOperator`,
-    `DiagonalLinearOperator`, and `TridiagonalLinearOperator`.  Those allocate a dense
-    n×n matrix full of zeros, and their O(n) specialized `mv` makes the vmap path
-    strictly better than a dense matmul.
-    """
-    if isinstance(op, (MatrixLinearOperator, PyTreeLinearOperator)):
-        return True
-    if isinstance(op, (MulLinearOperator, DivLinearOperator, NegLinearOperator)):
-        return _is_cheap_to_materialize(op.operator)
-    if isinstance(op, TaggedLinearOperator):
-        return _is_cheap_to_materialize(op.operator)
-    if isinstance(op, AddLinearOperator):
-        return _is_cheap_to_materialize(op.operator1) and _is_cheap_to_materialize(
-            op.operator2
-        )
-    return False
-
-
 def _try_collect_matrices(
     op: AbstractLinearOperator,
 ) -> "list[Array] | None":
@@ -1143,7 +1121,7 @@ def _try_collect_matrices(
 
     Traverses the binary tree of `ComposedLinearOperator` nodes depth-first and
     collects each leaf's matrix.  Returns ``None`` as soon as any leaf is not
-    cheaply materialisable, short-circuiting the traversal.
+    dense (per `is_dense`), short-circuiting the traversal.
     """
     if isinstance(op, ComposedLinearOperator):
         left = _try_collect_matrices(op.operator1)
@@ -1153,7 +1131,7 @@ def _try_collect_matrices(
         if right is None:
             return None
         return left + right
-    elif _is_cheap_to_materialize(op):
+    elif is_dense(op):
         return [op.as_matrix()]
     else:
         return None
@@ -1873,6 +1851,37 @@ def _(operator):
     return False
 
 
+# is_dense
+
+
+@ft.singledispatch
+def is_dense(operator: AbstractLinearOperator) -> bool:
+    """Returns whether an operator is backed by an explicit dense matrix, making
+    `as_matrix()` essentially free and the dense matmul path preferable to
+    applying the operator's `mv` column-by-column.
+
+    Operators with an O(n) specialised `mv` (e.g. `DiagonalLinearOperator`,
+    `TridiagonalLinearOperator`, `IdentityLinearOperator`) return `False` even
+    though they can produce a matrix, because materialising them allocates a
+    dense n×n array full of zeros and discards the structured efficiency.
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    Either `True` or `False`.
+    """
+    return False
+
+
+@is_dense.register(MatrixLinearOperator)
+@is_dense.register(PyTreeLinearOperator)
+def _(operator):
+    return True
+
+
 # ops for wrapper operators
 
 
@@ -2014,6 +2023,7 @@ for check in (
     is_tridiagonal,
     is_positive_semidefinite,
     is_negative_semidefinite,
+    is_dense,
 ):
 
     @check.register(TangentLinearOperator)
@@ -2028,6 +2038,7 @@ for check in (
     is_lower_triangular,
     is_upper_triangular,
     is_tridiagonal,
+    is_dense,
 ):
 
     @check.register(MulLinearOperator)
@@ -2141,6 +2152,12 @@ for check, tag in (
         return (tag in operator.tags) or check(operator.operator)
 
 
+# is_dense has no associated tag; just delegate to the wrapped operator.
+@is_dense.register(TaggedLinearOperator)
+def _(operator):
+    return is_dense(operator.operator)
+
+
 for check in (
     is_symmetric,
     is_diagonal,
@@ -2149,6 +2166,7 @@ for check in (
     is_positive_semidefinite,
     is_negative_semidefinite,
     is_tridiagonal,
+    is_dense,
 ):
 
     @check.register(AddLinearOperator)
@@ -2166,6 +2184,7 @@ for check in (
     is_diagonal,
     is_lower_triangular,
     is_upper_triangular,
+    is_dense,
 ):
 
     @check.register(ComposedLinearOperator)
