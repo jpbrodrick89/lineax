@@ -1115,22 +1115,15 @@ class DivLinearOperator(AbstractLinearOperator):
 
 
 def _is_cheap_to_materialize(op: AbstractLinearOperator) -> bool:
-    """True for operators whose `as_matrix()` requires no O(n) forward/vjp passes.
+    """True for operators where `as_matrix()` is cheap AND the resulting dense matmul
+    is not worse than applying the operator's specialized `mv` column-by-column.
 
-    Concretely, this covers operators that are already backed by an explicit array
-    (or can trivially construct one from stored data), as well as arithmetic wrappers
-    around such operators.
+    Excluded (despite having cheap-ish `as_matrix()`): `IdentityLinearOperator`,
+    `DiagonalLinearOperator`, and `TridiagonalLinearOperator`.  Those allocate a dense
+    n×n matrix full of zeros, and their O(n) specialized `mv` makes the vmap path
+    strictly better than a dense matmul.
     """
-    if isinstance(
-        op,
-        (
-            MatrixLinearOperator,
-            PyTreeLinearOperator,
-            DiagonalLinearOperator,
-            TridiagonalLinearOperator,
-            IdentityLinearOperator,
-        ),
-    ):
+    if isinstance(op, (MatrixLinearOperator, PyTreeLinearOperator)):
         return True
     if isinstance(op, (MulLinearOperator, DivLinearOperator, NegLinearOperator)):
         return _is_cheap_to_materialize(op.operator)
