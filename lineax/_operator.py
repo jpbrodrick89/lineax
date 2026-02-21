@@ -1114,6 +1114,58 @@ class DivLinearOperator(AbstractLinearOperator):
         return self.operator.out_structure()
 
 
+def _is_cheap_to_materialize(op: AbstractLinearOperator) -> bool:
+    """True for operators whose `as_matrix()` requires no O(n) forward/vjp passes.
+
+    Concretely, this covers operators that are already backed by an explicit array
+    (or can trivially construct one from stored data), as well as arithmetic wrappers
+    around such operators.
+    """
+    if isinstance(
+        op,
+        (
+            MatrixLinearOperator,
+            PyTreeLinearOperator,
+            DiagonalLinearOperator,
+            TridiagonalLinearOperator,
+            IdentityLinearOperator,
+        ),
+    ):
+        return True
+    if isinstance(op, (MulLinearOperator, DivLinearOperator, NegLinearOperator)):
+        return _is_cheap_to_materialize(op.operator)
+    if isinstance(op, TaggedLinearOperator):
+        return _is_cheap_to_materialize(op.operator)
+    if isinstance(op, AddLinearOperator):
+        return _is_cheap_to_materialize(op.operator1) and _is_cheap_to_materialize(
+            op.operator2
+        )
+    return False
+
+
+def _try_collect_matrices(
+    op: AbstractLinearOperator,
+) -> "list[Array] | None":
+    """Recursively flatten a composition tree into an ordered list of matrices.
+
+    Traverses the binary tree of `ComposedLinearOperator` nodes depth-first and
+    collects each leaf's matrix.  Returns ``None`` as soon as any leaf is not
+    cheaply materialisable, short-circuiting the traversal.
+    """
+    if isinstance(op, ComposedLinearOperator):
+        left = _try_collect_matrices(op.operator1)
+        if left is None:
+            return None
+        right = _try_collect_matrices(op.operator2)
+        if right is None:
+            return None
+        return left + right
+    elif _is_cheap_to_materialize(op):
+        return [op.as_matrix()]
+    else:
+        return None
+
+
 class ComposedLinearOperator(AbstractLinearOperator):
     """A linear operator formed by composing (matrix-multiplying) two other linear
     operators together.
@@ -1144,6 +1196,16 @@ class ComposedLinearOperator(AbstractLinearOperator):
             return self.operator2.as_matrix()
         if isinstance(self.operator2, IdentityLinearOperator):
             return self.operator1.as_matrix()
+        # If all operators in the composition tree can be cheaply materialised,
+        # collect their matrices and use multi_dot, which automatically selects
+        # the optimal multiplication order (important for non-square chains).
+        matrices = _try_collect_matrices(self)
+        if matrices is not None:
+            return jnp.linalg.multi_dot(matrices, precision=lax.Precision.HIGHEST)
+        # Fallback: operator1 is expensive to materialise (e.g. FunctionLinearOperator
+        # or JacobianLinearOperator) but has an efficient mv.  Apply it column-wise to
+        # the materialised operator2 via vmap, avoiding any O(n) forward-pass budget
+        # on operator1.
         _, unravel = eqx.filter_eval_shape(
             jfu.ravel_pytree, self.operator1.in_structure()
         )
