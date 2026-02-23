@@ -1161,11 +1161,19 @@ class ComposedLinearOperator(AbstractLinearOperator):
         return self.operator1.mv(self.operator2.mv(vector))
 
     def as_matrix(self):
-        return jnp.matmul(
-            self.operator1.as_matrix(),
-            self.operator2.as_matrix(),
-            precision=lax.Precision.HIGHEST,  # pyright: ignore
+        if isinstance(self.operator1, IdentityLinearOperator):
+            return self.operator2.as_matrix()
+        if isinstance(self.operator2, IdentityLinearOperator):
+            return self.operator1.as_matrix()
+        _, unravel = eqx.filter_eval_shape(
+            jfu.ravel_pytree, self.operator1.in_structure()
         )
+
+        def mv_flat(v):
+            out = self.operator1.mv(unravel(v))
+            return jfu.ravel_pytree(out)[0]
+
+        return jax.vmap(mv_flat, in_axes=1, out_axes=1)(self.operator2.as_matrix())
 
     def transpose(self):
         return self.operator2.transpose() @ self.operator1.transpose()
@@ -1993,6 +2001,10 @@ def _(operator):
 
 @materialise.register(ComposedLinearOperator)
 def _(operator):
+    if isinstance(operator.operator1, IdentityLinearOperator):
+        return materialise(operator.operator2)
+    if isinstance(operator.operator2, IdentityLinearOperator):
+        return materialise(operator.operator1)
     maybe_sparse_op = _try_sparse_materialise(operator)
     if maybe_sparse_op is not operator:
         return maybe_sparse_op
