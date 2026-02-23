@@ -1927,6 +1927,13 @@ for transform in (linearise, materialise, diagonal):
         return transform(operator.operator) / operator.scalar
 
 
+for transform in (linearise, diagonal):
+
+    @transform.register(AddLinearOperator)  # pyright: ignore
+    def _(operator, transform=transform):
+        return transform(operator.operator1) + transform(operator.operator2)  # pyright: ignore
+
+
 @materialise.register(AddLinearOperator)
 def _(operator):
     maybe_sparse_op = _try_sparse_materialise(operator)
