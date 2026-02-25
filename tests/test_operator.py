@@ -23,6 +23,7 @@ import pytest
 
 from .helpers import (
     make_identity_operator,
+    make_inverse_operator,
     make_jacrev_operator,
     make_operators,
     make_tridiagonal_operator,
@@ -96,6 +97,10 @@ def test_structures_vector(make_operator, getkey):
         matrix = jnp.eye(4)
         tags = lx.tridiagonal_tag
         in_size = out_size = 4
+    elif make_operator is make_inverse_operator:
+        matrix = jr.normal(getkey(), (3, 3))
+        tags = ()
+        in_size = out_size = 3
     else:
         matrix = jr.normal(getkey(), (3, 5))
         tags = ()
@@ -123,6 +128,13 @@ def _setup(getkey, matrix, tag: object | frozenset[object] = frozenset()):
             lx.diagonal_tag,
             lx.symmetric_tag,
         ):
+            continue
+        if (
+            make_operator is make_inverse_operator
+            and matrix.shape[0] != matrix.shape[1]
+        ):
+            continue
+        if make_operator is make_inverse_operator and tag == lx.unit_diagonal_tag:
             continue
         operator = make_operator(getkey, matrix, tag)
         yield operator

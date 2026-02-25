@@ -15,6 +15,7 @@
 import importlib.metadata
 
 from . import internal as internal
+from ._inverse import InverseLinearOperator as InverseLinearOperator
 from ._operator import (
     AbstractLinearOperator as AbstractLinearOperator,
     AddLinearOperator as AddLinearOperator,

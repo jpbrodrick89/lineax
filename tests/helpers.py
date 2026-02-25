@@ -156,6 +156,8 @@ def params(only_pseudo):
                 and tags != lx.tridiagonal_tag
             ):
                 continue
+            if make_operator is make_inverse_operator and pseudoinverse:
+                continue
             yield make_operator, solver, tags
 
 
@@ -317,6 +319,13 @@ def make_composed_operator(getkey, matrix, tags):
     operator1 = make_trivial_pytree_operator(getkey, matrix / diag[None], ())
     operator2 = lx.DiagonalLinearOperator(diag)
     return lx.TaggedLinearOperator(operator1 @ operator2, tags)
+
+
+@_operators_append
+def make_inverse_operator(getkey, matrix, tags):
+    inv_matrix = jnp.linalg.inv(matrix)
+    inner = lx.MatrixLinearOperator(inv_matrix, tags)
+    return lx.InverseLinearOperator(inner)
 
 
 # Slightly sketchy approach to finite differences, in that this is pulled out of
