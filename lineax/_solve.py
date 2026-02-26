@@ -805,18 +805,25 @@ def invert(
     *,
     options: dict[str, Any] | None = None,
 ) -> FunctionLinearOperator:
-    """Returns a [`lineax.FunctionLinearOperator`][] representing the inverse of
-    `operator`.
+    r"""Returns a [`lineax.FunctionLinearOperator`][] representing the
+    (pseudo)inverse of `operator`.
 
-    `invert(A).mv(v)` computes `A^{-1} v` by solving `A x = v` using
-    [`lineax.linear_solve`][]. The solver state (typically a factorisation such as
-    LU or Cholesky) is computed eagerly and cached, so that subsequent matvecs
-    re-use it.  The returned operator fully supports AD (both forward and reverse
-    mode), `vmap`, and composition with other operators.
+    - If `operator` is square and nonsingular, then `invert(A).mv(v)` computes
+      $A^{-1} v$.
+    - If `operator` is non-square or singular, then `invert(A).mv(v)` computes
+      $A^\dagger v$, i.e. the
+      [Moore--Penrose pseudoinverse](https://en.wikipedia.org/wiki/Moore%E2%80%93Penrose_inverse)
+      applied to `v`. This requires a solver capable of handling ill-posed
+      systems (e.g. `AutoLinearSolver(well_posed=False)`).
+
+    The solver state (typically a factorisation such as LU or Cholesky) is
+    computed eagerly and cached, so that subsequent matvecs re-use it. The
+    returned operator fully supports AD (both forward and reverse mode), `vmap`,
+    and composition with other operators.
 
     **Arguments:**
 
-    - `operator`: the linear operator to invert. Must be square.
+    - `operator`: the linear operator to invert.
     - `solver`: the linear solver to use. Defaults to
         `AutoLinearSolver(well_posed=True)`.
     - `options`: additional options passed to the solver. Defaults to `None`.
@@ -825,24 +832,6 @@ def invert(
 
     A [`lineax.FunctionLinearOperator`][] whose `mv` solves `operator @ x = v`.
     """
-    if operator.in_size() != operator.out_size():
-        raise ValueError(
-            "`invert` requires a square operator, but got "
-            f"in_size={operator.in_size()} and "
-            f"out_size={operator.out_size()}."
-        )
-    well_posed = getattr(solver, "well_posed", True)
-    if not well_posed:
-        raise ValueError(
-            "`invert` requires a well-posed solver, but got "
-            f"`solver.well_posed={well_posed}`. Use a well-posed solver "
-            "(e.g. `AutoLinearSolver(well_posed=True)`)."
-        )
-    if not solver.assume_full_rank():
-        raise ValueError(
-            "`invert` requires a solver that assumes full rank, but "
-            f"`{type(solver).__name__}.assume_full_rank()` returned False."
-        )
     if options is None:
         options = {}
     state = solver.init(operator, options)

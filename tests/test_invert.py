@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import lineax as lx
-import pytest
 
 from .helpers import tree_allclose
 
@@ -34,41 +33,6 @@ def _well_conditioned_psd_matrix(getkey, size=3, dtype=jnp.float64):
     """Generate a well-conditioned PSD matrix."""
     matrix = _well_conditioned_matrix(getkey, size, dtype)
     return matrix @ matrix.T.conj()
-
-
-# -- Validation --
-
-
-def test_square_only_validation():
-    """invert rejects non-square operators."""
-    matrix = jnp.ones((3, 4))
-    op = lx.FunctionLinearOperator(
-        lambda x: matrix @ x,
-        jax.ShapeDtypeStruct((4,), jnp.float64),
-    )
-    with pytest.raises(ValueError, match="square"):
-        lx.invert(op)
-
-
-def test_well_posed_false_validation():
-    """invert rejects well_posed=False."""
-    op = lx.MatrixLinearOperator(jnp.eye(3))
-    with pytest.raises(ValueError, match="well-posed"):
-        lx.invert(op, solver=lx.AutoLinearSolver(well_posed=False))
-
-
-def test_well_posed_none_validation():
-    """invert rejects well_posed=None."""
-    op = lx.MatrixLinearOperator(jnp.eye(3))
-    with pytest.raises(ValueError, match="well-posed"):
-        lx.invert(op, solver=lx.AutoLinearSolver(well_posed=None))
-
-
-def test_assume_full_rank_validation():
-    """invert rejects solvers that don't assume full rank."""
-    op = lx.MatrixLinearOperator(jnp.eye(3))
-    with pytest.raises(ValueError, match="full rank"):
-        lx.invert(op, solver=lx.SVD())
 
 
 # -- Core behaviour --
@@ -104,6 +68,31 @@ def test_double_inverse(getkey):
     vec = jr.normal(getkey(), (3,), dtype=jnp.float64)
     result = double_inv.mv(vec)
     expected = matrix @ vec
+    assert tree_allclose(result, expected, atol=1e-8)
+
+
+# -- Pseudoinverse (non-square) --
+
+
+def test_pseudoinverse_overdetermined(getkey):
+    """invert of a tall matrix gives the least-squares pseudoinverse."""
+    matrix = jr.normal(getkey(), (5, 3), dtype=jnp.float64)
+    op = lx.MatrixLinearOperator(matrix)
+    pinv_op = lx.invert(op, solver=lx.AutoLinearSolver(well_posed=False))
+    vec = jr.normal(getkey(), (5,), dtype=jnp.float64)
+    result = pinv_op.mv(vec)
+    expected = jnp.linalg.lstsq(matrix, vec)[0]
+    assert tree_allclose(result, expected, atol=1e-8)
+
+
+def test_pseudoinverse_underdetermined(getkey):
+    """invert of a wide matrix gives the minimum-norm pseudoinverse."""
+    matrix = jr.normal(getkey(), (3, 5), dtype=jnp.float64)
+    op = lx.MatrixLinearOperator(matrix)
+    pinv_op = lx.invert(op, solver=lx.AutoLinearSolver(well_posed=False))
+    vec = jr.normal(getkey(), (3,), dtype=jnp.float64)
+    result = pinv_op.mv(vec)
+    expected = jnp.linalg.lstsq(matrix, vec)[0]
     assert tree_allclose(result, expected, atol=1e-8)
 
 
