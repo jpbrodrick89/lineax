@@ -804,6 +804,7 @@ def invert(
     solver: AbstractLinearSolver = AutoLinearSolver(well_posed=True),
     *,
     options: dict[str, Any] | None = None,
+    cache: bool = False,
 ) -> FunctionLinearOperator:
     r"""Returns a [`lineax.FunctionLinearOperator`][] representing the
     (pseudo)inverse of `operator`.
@@ -816,10 +817,8 @@ def invert(
       applied to `v`. This requires a solver capable of handling ill-posed
       systems (e.g. `AutoLinearSolver(well_posed=False)`).
 
-    The solver state (typically a factorisation such as LU or Cholesky) is
-    computed eagerly and cached, so that subsequent matvecs re-use it. The
-    returned operator fully supports AD (both forward and reverse mode), `vmap`,
-    and composition with other operators.
+    The returned operator fully supports AD (both forward and reverse mode),
+    `vmap`, and composition with other operators.
 
     **Arguments:**
 
@@ -827,6 +826,9 @@ def invert(
     - `solver`: the linear solver to use. Defaults to
         `AutoLinearSolver(well_posed=True)`.
     - `options`: additional options passed to the solver. Defaults to `None`.
+    - `cache`: if `True`, eagerly compute and cache the solver state (typically
+        a factorisation such as LU or Cholesky) so that subsequent matvecs
+        re-use it. This trades memory for runtime. Defaults to `False`.
 
     **Returns:**
 
@@ -834,10 +836,14 @@ def invert(
     """
     if options is None:
         options = {}
-    state = solver.init(operator, options)
-    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
-    dynamic_state = lax.stop_gradient(dynamic_state)
-    state = eqx.combine(dynamic_state, static_state)
+
+    if cache:
+        state = solver.init(operator, options)
+        dynamic_state, static_state = eqx.partition(state, eqx.is_array)
+        dynamic_state = lax.stop_gradient(dynamic_state)
+        state = eqx.combine(dynamic_state, static_state)
+    else:
+        state = sentinel
 
     def solve_fn(vector):
         return linear_solve(
