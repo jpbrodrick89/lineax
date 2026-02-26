@@ -809,13 +809,9 @@ def invert(
     r"""Returns a [`lineax.FunctionLinearOperator`][] representing the
     (pseudo)inverse of `operator`.
 
-    - If `operator` is square and nonsingular, then `invert(A).mv(v)` computes
-      $A^{-1} v$.
-    - If `operator` is non-square or singular, then `invert(A).mv(v)` computes
-      $A^\dagger v$, i.e. the
-      [Moore--Penrose pseudoinverse](https://en.wikipedia.org/wiki/Moore%E2%80%93Penrose_inverse)
-      applied to `v`. This requires a solver capable of handling ill-posed
-      systems (e.g. `AutoLinearSolver(well_posed=False)`).
+    `invert(A).mv(v)` is equivalent to `linear_solve(A, v, solver).value`.
+    See [`lineax.linear_solve`][] for details on how the solution is defined
+    for square, overdetermined, and underdetermined systems.
 
     The returned operator fully supports AD (both forward and reverse mode),
     `vmap`, and composition with other operators.
@@ -854,17 +850,18 @@ def invert(
             options=options,
         ).value
 
-    tags = set()
-    for check, tag in [
-        (is_symmetric, symmetric_tag),
-        (is_diagonal, diagonal_tag),
-        (is_lower_triangular, lower_triangular_tag),
-        (is_upper_triangular, upper_triangular_tag),
-        (is_positive_semidefinite, positive_semidefinite_tag),
-        (is_negative_semidefinite, negative_semidefinite_tag),
-    ]:
-        if check(operator):
-            tags.add(tag)
+    tags = {
+        tag
+        for check, tag in [
+            (is_symmetric, symmetric_tag),
+            (is_diagonal, diagonal_tag),
+            (is_lower_triangular, lower_triangular_tag),
+            (is_upper_triangular, upper_triangular_tag),
+            (is_positive_semidefinite, positive_semidefinite_tag),
+            (is_negative_semidefinite, negative_semidefinite_tag),
+        ]
+        if check(operator)
+    }
     if has_unit_diagonal(operator) and (
         is_diagonal(operator)
         or is_lower_triangular(operator)

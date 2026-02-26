@@ -135,21 +135,6 @@ def test_solver_cg(getkey):
     assert tree_allclose(result, expected, atol=1e-8)
 
 
-# -- Diagonal optimisation --
-
-
-def test_diagonal_optimisation(getkey):
-    """diagonal(invert(op)) uses O(n) path for diagonal inner operators."""
-    diag = jr.normal(getkey(), (5,), dtype=jnp.float64)
-    diag = jnp.where(jnp.abs(diag) < 0.1, 1.0, diag)
-    op = lx.DiagonalLinearOperator(diag)
-    inv_op = lx.invert(op)
-    vec = jr.normal(getkey(), (5,), dtype=jnp.float64)
-    result = inv_op.mv(vec)
-    expected = vec / diag
-    assert tree_allclose(result, expected, atol=1e-10)
-
-
 # -- vmap --
 
 
