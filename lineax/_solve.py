@@ -369,6 +369,14 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
             solution2 = lx.linear_solve(operator, vector2, solver, state=state)
             ```
 
+        !!! Warning
+
+            Passing `state` to `linear_solve` does not support autodiff out of
+            the box. If you need to differentiate through the solve, either
+            wrap the state with `jax.lax.stop_gradient`, or use
+            [`lineax.invert`][] (with `cache=True`) which handles this
+            automatically.
+
         **Arguments:**
 
         - `operator`: a linear operator.
