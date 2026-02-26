@@ -1199,16 +1199,10 @@ def linearise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     Mathematically speaking this is just the identity function. And indeed most linear
     operators will be returned unchanged.
 
-    For [`lineax.JacobianLinearOperator`][], then this will cache the
+    For specifically [`lineax.JacobianLinearOperator`][], then this will cache the
     primal pass, so that it does not need to be recomputed each time. That is, it uses
     some memory to improve speed. (This is the precisely same distinction as `jax.jvp`
     versus `jax.linearize`.)
-
-    For [`lineax.InverseLinearOperator`][], then this will cache the solver state
-    (typically the bottleneck with dense direct solvers such as LU, QR and SVD)
-    with [`solver.init`](../api/solvers.md).  The returned
-    [`lineax.FunctionLinearOperator`][] can support sequential, batched and composed
-    solves while fully supporting AD.
 
     **Arguments:**
 
@@ -1262,10 +1256,9 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     Mathematically speaking this is just the identity function. And indeed most linear
     operators will be returned unchanged.
 
-    For specifically [`lineax.JacobianLinearOperator`][],
-    [`lineax.InverseLinearOperator`][] and [`lineax.FunctionLinearOperator`][]
-    then the linear operator is materialised in memory.
-    That is, it becomes defined as a matrix (or pytree of arrays), rather
+    For specifically [`lineax.JacobianLinearOperator`][] and
+    [`lineax.FunctionLinearOperator`][] then the linear operator is materialised in
+    memory. That is, it becomes defined as a matrix (or pytree of arrays), rather
     than being defined only through its matrix-vector product
     ([`lineax.AbstractLinearOperator.mv`][]).
 

@@ -33,17 +33,29 @@ from ._misc import inexact_asarray, strip_weak_dtype
 from ._operator import (
     AbstractLinearOperator,
     conj,
+    FunctionLinearOperator,
+    has_unit_diagonal,
     IdentityLinearOperator,
     is_diagonal,
     is_lower_triangular,
     is_negative_semidefinite,
     is_positive_semidefinite,
+    is_symmetric,
     is_tridiagonal,
     is_upper_triangular,
     linearise,
     TangentLinearOperator,
 )
 from ._solution import RESULTS, Solution
+from ._tags import (
+    diagonal_tag,
+    lower_triangular_tag,
+    negative_semidefinite_tag,
+    positive_semidefinite_tag,
+    symmetric_tag,
+    unit_diagonal_tag,
+    upper_triangular_tag,
+)
 
 
 #
@@ -785,6 +797,86 @@ def linear_solve(
     # TODO: prevent forward-mode autodiff through stats
     stats = eqxi.nondifferentiable_backward(stats)
     return Solution(value=solution, result=result, state=state, stats=stats)
+
+
+def invert(
+    operator: AbstractLinearOperator,
+    solver: AbstractLinearSolver = AutoLinearSolver(well_posed=True),
+    *,
+    options: dict[str, Any] | None = None,
+) -> FunctionLinearOperator:
+    """Returns a [`lineax.FunctionLinearOperator`][] representing the inverse of
+    `operator`.
+
+    `invert(A).mv(v)` computes `A^{-1} v` by solving `A x = v` using
+    [`lineax.linear_solve`][]. The solver state (typically a factorisation such as
+    LU or Cholesky) is computed eagerly and cached, so that subsequent matvecs
+    re-use it.  The returned operator fully supports AD (both forward and reverse
+    mode), `vmap`, and composition with other operators.
+
+    **Arguments:**
+
+    - `operator`: the linear operator to invert. Must be square.
+    - `solver`: the linear solver to use. Defaults to
+        `AutoLinearSolver(well_posed=True)`.
+    - `options`: additional options passed to the solver. Defaults to `None`.
+
+    **Returns:**
+
+    A [`lineax.FunctionLinearOperator`][] whose `mv` solves `operator @ x = v`.
+    """
+    if operator.in_size() != operator.out_size():
+        raise ValueError(
+            "`invert` requires a square operator, but got "
+            f"in_size={operator.in_size()} and "
+            f"out_size={operator.out_size()}."
+        )
+    well_posed = getattr(solver, "well_posed", True)
+    if not well_posed:
+        raise ValueError(
+            "`invert` requires a well-posed solver, but got "
+            f"`solver.well_posed={well_posed}`. Use a well-posed solver "
+            "(e.g. `AutoLinearSolver(well_posed=True)`)."
+        )
+    if not solver.assume_full_rank():
+        raise ValueError(
+            "`invert` requires a solver that assumes full rank, but "
+            f"`{type(solver).__name__}.assume_full_rank()` returned False."
+        )
+    if options is None:
+        options = {}
+    state = solver.init(operator, options)
+    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
+    dynamic_state = lax.stop_gradient(dynamic_state)
+    state = eqx.combine(dynamic_state, static_state)
+
+    def solve_fn(vector):
+        return linear_solve(
+            operator,
+            vector,
+            solver,
+            state=state,
+            options=options,
+        ).value
+
+    tags = set()
+    for check, tag in [
+        (is_symmetric, symmetric_tag),
+        (is_diagonal, diagonal_tag),
+        (is_lower_triangular, lower_triangular_tag),
+        (is_upper_triangular, upper_triangular_tag),
+        (is_positive_semidefinite, positive_semidefinite_tag),
+        (is_negative_semidefinite, negative_semidefinite_tag),
+    ]:
+        if check(operator):
+            tags.add(tag)
+    if has_unit_diagonal(operator) and (
+        is_diagonal(operator)
+        or is_lower_triangular(operator)
+        or is_upper_triangular(operator)
+    ):
+        tags.add(unit_diagonal_tag)
+    return FunctionLinearOperator(solve_fn, operator.out_structure(), frozenset(tags))
 
 
 # Work around JAX issue #22011,

@@ -74,10 +74,3 @@ Or, perhaps we only have a function $F : \mathbb{R}^m \to \mathbb{R}^n$ such tha
     options:
         members:
             - __init__
-
----
-
-::: lineax.InverseLinearOperator
-    options:
-        members:
-            - __init__
