@@ -1271,6 +1271,10 @@ def _(operator):
 
 
 @ft.singledispatch
+def _materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
+    _default_not_implemented("materialise", operator)
+
+
 def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     """Materialises a linear operator. This returns another linear operator.
 
@@ -1321,8 +1325,29 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
 
     Another linear operator. Mathematically it performs matrix-vector products
     (`operator.mv`) that produce the same results as the input `operator`.
+
+    **Custom operators:**
+
+    To add support for a custom operator, register an implementation via
+    `materialise.register`:
+
+    ```python
+    @lx.materialise.register(MyOperator)
+    def _(operator):
+        ...
+    ```
+
+    The sparse-materialisation check (converting diagonal operators to
+    [`lineax.DiagonalLinearOperator`][]) is performed automatically before
+    dispatching, so custom registrations do not need to handle it themselves.
     """
-    _default_not_implemented("materialise", operator)
+    maybe_sparse = _try_sparse_materialise(operator)
+    if maybe_sparse is not operator:
+        return maybe_sparse
+    return _materialise(operator)
+
+
+materialise.register = _materialise.register
 
 
 def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
@@ -1331,8 +1356,18 @@ def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearO
     Returns a DiagonalLinearOperator if the operator is tagged as diagonal,
     otherwise returns the original operator unchanged. The resulting operator
     preserves the input/output structure of the original operator.
+
+    Returns the operator unchanged if it is already a DiagonalLinearOperator or
+    IdentityLinearOperator (already in an efficient sparse form), or if the
+    operator type does not have an is_diagonal registration.
     """
-    if is_diagonal(operator):
+    if isinstance(operator, (DiagonalLinearOperator, IdentityLinearOperator)):
+        return operator
+    try:
+        is_diag = is_diagonal(operator)
+    except NotImplementedError:
+        return operator
+    if is_diag:
         diag_flat = diagonal(operator)
         _, unravel = eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
         diag_pytree = unravel(diag_flat)
@@ -1345,24 +1380,21 @@ def _construct_diagonal_basis(structure: PyTree[jax.ShapeDtypeStruct]) -> PyTree
     return jtu.tree_map(lambda s: jnp.ones(s.shape, s.dtype), structure)
 
 
-@materialise.register(MatrixLinearOperator)
-@materialise.register(PyTreeLinearOperator)
-def _(operator):
-    return _try_sparse_materialise(operator)
-
-
-@materialise.register(IdentityLinearOperator)
-@materialise.register(DiagonalLinearOperator)
-@materialise.register(TridiagonalLinearOperator)
+@_materialise.register(MatrixLinearOperator)
+@_materialise.register(PyTreeLinearOperator)
 def _(operator):
     return operator
 
 
-@materialise.register(JacobianLinearOperator)
+@_materialise.register(IdentityLinearOperator)
+@_materialise.register(DiagonalLinearOperator)
+@_materialise.register(TridiagonalLinearOperator)
 def _(operator):
-    maybe_sparse_op = _try_sparse_materialise(operator)
-    if maybe_sparse_op is not operator:
-        return maybe_sparse_op
+    return operator
+
+
+@_materialise.register(JacobianLinearOperator)
+def _(operator):
     fn = _NoAuxIn(operator.fn, operator.args)
     jac = jacobian(
         fn,
@@ -1374,11 +1406,8 @@ def _(operator):
     return PyTreeLinearOperator(jac, operator.out_structure(), operator.tags)
 
 
-@materialise.register(FunctionLinearOperator)
+@_materialise.register(FunctionLinearOperator)
 def _(operator):
-    maybe_sparse_op = _try_sparse_materialise(operator)
-    if maybe_sparse_op is not operator:
-        return maybe_sparse_op
     flat, unravel = strip_weak_dtype(
         eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
     )
@@ -1893,7 +1922,7 @@ def _(operator):
     return TaggedLinearOperator(linearise(operator.operator), operator.tags)
 
 
-@materialise.register(TaggedLinearOperator)
+@_materialise.register(TaggedLinearOperator)
 def _(operator):
     return TaggedLinearOperator(materialise(operator.operator), operator.tags)
 
@@ -1934,11 +1963,8 @@ for transform in (linearise, diagonal):
         return transform(operator.operator1) + transform(operator.operator2)  # pyright: ignore
 
 
-@materialise.register(AddLinearOperator)
+@_materialise.register(AddLinearOperator)
 def _(operator):
-    maybe_sparse_op = _try_sparse_materialise(operator)
-    if maybe_sparse_op is not operator:
-        return maybe_sparse_op
     return materialise(operator.operator1) + materialise(operator.operator2)
 
 
@@ -1950,7 +1976,7 @@ def _(operator):
     return TangentLinearOperator(primal_out, tangent_out)
 
 
-@materialise.register(TangentLinearOperator)
+@_materialise.register(TangentLinearOperator)
 def _(operator):
     primal_out, tangent_out = eqx.filter_jvp(
         materialise, (operator.primal,), (operator.tangent,)
@@ -2006,15 +2032,12 @@ def _(operator):
     return linearise(operator.operator1) @ linearise(operator.operator2)
 
 
-@materialise.register(ComposedLinearOperator)
+@_materialise.register(ComposedLinearOperator)
 def _(operator):
     if isinstance(operator.operator1, IdentityLinearOperator):
         return materialise(operator.operator2)
     if isinstance(operator.operator2, IdentityLinearOperator):
         return materialise(operator.operator1)
-    maybe_sparse_op = _try_sparse_materialise(operator)
-    if maybe_sparse_op is not operator:
-        return maybe_sparse_op
     return materialise(operator.operator1) @ materialise(operator.operator2)
 
 
