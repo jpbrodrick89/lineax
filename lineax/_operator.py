@@ -1344,11 +1344,7 @@ def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearO
     otherwise returns the original operator unchanged. The resulting operator
     preserves the input/output structure of the original operator.
     """
-    try:
-        is_diag = is_diagonal(operator)
-    except NotImplementedError:
-        return operator
-    if is_diag:
+    if is_diagonal(operator):
         diag_flat = diagonal(operator)
         _, unravel = eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
         diag_pytree = unravel(diag_flat)
