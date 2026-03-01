@@ -1356,7 +1356,6 @@ def _construct_diagonal_basis(structure: PyTree[jax.ShapeDtypeStruct]) -> PyTree
 
 @materialise.register(MatrixLinearOperator)
 @materialise.register(PyTreeLinearOperator)
-@materialise.register(IdentityLinearOperator)
 @materialise.register(DiagonalLinearOperator)
 @materialise.register(TridiagonalLinearOperator)
 def _(operator):
