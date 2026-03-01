@@ -1326,9 +1326,19 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     Another linear operator. Mathematically it performs matrix-vector products
     (`operator.mv`) that produce the same results as the input `operator`.
     """
-    maybe_sparse = _try_sparse_materialise(operator)
-    if maybe_sparse is not operator:
-        return maybe_sparse
+    if not isinstance(operator, (DiagonalLinearOperator, IdentityLinearOperator)):
+        try:
+            is_diag = is_diagonal(operator)
+        except NotImplementedError:
+            pass
+        else:
+            if is_diag:
+                diag_flat = diagonal(operator)
+                _, unravel = eqx.filter_eval_shape(
+                    jfu.ravel_pytree, operator.in_structure()
+                )
+                diag_pytree = unravel(diag_flat)
+                return DiagonalLinearOperator(diag_pytree)
     return _materialise(operator)
 
 
