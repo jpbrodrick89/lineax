@@ -1331,9 +1331,6 @@ def _materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     _default_not_implemented("materialise", operator)
 
 
-materialise.register = _materialise.register
-
-
 def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     """Try to materialise to a sparse operator.
 
@@ -1354,15 +1351,15 @@ def _construct_diagonal_basis(structure: PyTree[jax.ShapeDtypeStruct]) -> PyTree
     return jtu.tree_map(lambda s: jnp.ones(s.shape, s.dtype), structure)
 
 
-@materialise.register(MatrixLinearOperator)
-@materialise.register(PyTreeLinearOperator)
-@materialise.register(DiagonalLinearOperator)
-@materialise.register(TridiagonalLinearOperator)
+@_materialise.register(MatrixLinearOperator)
+@_materialise.register(PyTreeLinearOperator)
+@_materialise.register(DiagonalLinearOperator)
+@_materialise.register(TridiagonalLinearOperator)
 def _(operator):
     return operator
 
 
-@materialise.register(JacobianLinearOperator)
+@_materialise.register(JacobianLinearOperator)
 def _(operator):
     fn = _NoAuxIn(operator.fn, operator.args)
     jac = jacobian(
@@ -1375,7 +1372,7 @@ def _(operator):
     return PyTreeLinearOperator(jac, operator.out_structure(), operator.tags)
 
 
-@materialise.register(FunctionLinearOperator)
+@_materialise.register(FunctionLinearOperator)
 def _(operator):
     flat, unravel = strip_weak_dtype(
         eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
@@ -1891,7 +1888,7 @@ def _(operator):
     return TaggedLinearOperator(linearise(operator.operator), operator.tags)
 
 
-@materialise.register(TaggedLinearOperator)
+@_materialise.register(TaggedLinearOperator)
 def _(operator):
     return TaggedLinearOperator(materialise(operator.operator), operator.tags)
 
@@ -1906,7 +1903,7 @@ def _(operator):
     return tridiagonal(operator.operator)
 
 
-for transform in (linearise, materialise, diagonal):
+for transform in (linearise, diagonal):
 
     @transform.register(AddLinearOperator)  # pyright: ignore
     def _(operator, transform=transform):
@@ -1932,9 +1929,24 @@ for transform in (linearise, diagonal):
         return transform(operator.operator1) + transform(operator.operator2)  # pyright: ignore
 
 
-@materialise.register(AddLinearOperator)
+@_materialise.register(AddLinearOperator)
 def _(operator):
     return materialise(operator.operator1) + materialise(operator.operator2)
+
+
+@_materialise.register(MulLinearOperator)
+def _(operator):
+    return materialise(operator.operator) * operator.scalar
+
+
+@_materialise.register(NegLinearOperator)
+def _(operator):
+    return -materialise(operator.operator)
+
+
+@_materialise.register(DivLinearOperator)
+def _(operator):
+    return materialise(operator.operator) / operator.scalar
 
 
 @linearise.register(TangentLinearOperator)
@@ -1945,7 +1957,7 @@ def _(operator):
     return TangentLinearOperator(primal_out, tangent_out)
 
 
-@materialise.register(TangentLinearOperator)
+@_materialise.register(TangentLinearOperator)
 def _(operator):
     primal_out, tangent_out = eqx.filter_jvp(
         materialise, (operator.primal,), (operator.tangent,)
@@ -2001,7 +2013,7 @@ def _(operator):
     return linearise(operator.operator1) @ linearise(operator.operator2)
 
 
-@materialise.register(ComposedLinearOperator)
+@_materialise.register(ComposedLinearOperator)
 def _(operator):
     if isinstance(operator.operator1, IdentityLinearOperator):
         return materialise(operator.operator2)
