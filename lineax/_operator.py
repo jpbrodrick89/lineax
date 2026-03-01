@@ -1368,15 +1368,12 @@ def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearO
 
 
 def _construct_diagonal_basis(structure: PyTree[jax.ShapeDtypeStruct]) -> PyTree[Array]:
+    """Construct a PyTree of ones matching the given structure."""
     return jtu.tree_map(lambda s: jnp.ones(s.shape, s.dtype), structure)
 
 
 @materialise.register(MatrixLinearOperator)
 @materialise.register(PyTreeLinearOperator)
-def _(operator):
-    return operator
-
-
 @materialise.register(IdentityLinearOperator)
 @materialise.register(DiagonalLinearOperator)
 @materialise.register(TridiagonalLinearOperator)
