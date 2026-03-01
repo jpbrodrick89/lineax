@@ -1325,17 +1325,6 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
 
     Another linear operator. Mathematically it performs matrix-vector products
     (`operator.mv`) that produce the same results as the input `operator`.
-
-    **Custom operators:**
-
-    To add support for a custom operator, register an implementation via
-    `materialise.register`:
-
-    ```python
-    @lx.materialise.register(MyOperator)
-    def _(operator):
-        ...
-    ```
     """
     maybe_sparse = _try_sparse_materialise(operator)
     if maybe_sparse is not operator:
