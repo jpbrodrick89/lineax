@@ -1270,11 +1270,6 @@ def _(operator):
 # materialise
 
 
-@ft.singledispatch
-def _materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
-    _default_not_implemented("materialise", operator)
-
-
 def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     """Materialises a linear operator. This returns another linear operator.
 
@@ -1329,6 +1324,11 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     if isinstance(operator, IdentityLinearOperator):
         return operator
     return _materialise(_try_sparse_materialise(operator))
+
+
+@ft.singledispatch
+def _materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
+    _default_not_implemented("materialise", operator)
 
 
 materialise.register = _materialise.register
