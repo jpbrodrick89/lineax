@@ -1326,6 +1326,8 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     Another linear operator. Mathematically it performs matrix-vector products
     (`operator.mv`) that produce the same results as the input `operator`.
     """
+    if isinstance(operator, IdentityLinearOperator):
+        return operator
     maybe_sparse = _try_sparse_materialise(operator)
     if maybe_sparse is not operator:
         return maybe_sparse
@@ -1342,8 +1344,6 @@ def _try_sparse_materialise(operator: AbstractLinearOperator) -> AbstractLinearO
     otherwise returns the original operator unchanged. The resulting operator
     preserves the input/output structure of the original operator.
     """
-    if isinstance(operator, (DiagonalLinearOperator, IdentityLinearOperator)):
-        return operator
     try:
         is_diag = is_diagonal(operator)
     except NotImplementedError:
