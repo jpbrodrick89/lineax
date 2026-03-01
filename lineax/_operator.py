@@ -1328,10 +1328,7 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     """
     if isinstance(operator, IdentityLinearOperator):
         return operator
-    maybe_sparse = _try_sparse_materialise(operator)
-    if maybe_sparse is not operator:
-        return maybe_sparse
-    return _materialise(operator)
+    return _materialise(_try_sparse_materialise(operator))
 
 
 materialise.register = _materialise.register
