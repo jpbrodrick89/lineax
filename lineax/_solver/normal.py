@@ -192,12 +192,16 @@ Normal.__init__.__doc__ = """**Arguments:**
 def _(solver: Normal, state, vector):
     inner_state, tall, operator_conj_transpose, inner_options = state
     if not tall.value:
-        # Wide case: inner operator is AA^H, not A^H A.  Even though this is
-        # rare today, future rank-revealing square solvers (e.g. pivoted LDL^T)
-        # could legitimately be used here for sparse rank-deficient gram matrices.
-        # We cannot implement gram_inverse_mv from the stored AA^H factorization
-        # alone (the result lives in ℝⁿ, not ℝᵐ), so fall back to the generic
-        # two-solve path in _linear_solve_jvp.
+        if solver.inner_solver.assume_full_rank():
+            # Should be unreachable: if the inner solver is full rank then
+            # Normal.assume_full_rank() is True, so assume_independent_rows is
+            # always True for wide operators and _gram_inverse_mv is never called.
+            raise NotImplementedError(
+                "Please open a GitHub issue: https://github.com/google/lineax"
+            )
+        # Wide case with non-full-rank inner solver (e.g. future pivoted LDL^T):
+        # inner operator is AA^H, not A^H A.  Cannot compute (A^H A)^† from the
+        # stored AA^H factorization alone (result lives in ℝⁿ, state in ℝᵐ).
         return NotImplemented
     # Tall case: inner operator IS A^H A.
     # (A^H A)^{-1} v = inner_solver.compute — one solve, no round-trip through ℝᵐ.
