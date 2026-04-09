@@ -20,7 +20,7 @@ import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import _gram_inverse_mv, _row_space_projection, AbstractLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -106,33 +106,6 @@ class QR(AbstractLinearSolver):
         conj_options = {}
         return conj_state, conj_options
 
-    def gram_inverse_mv(self, state: _QRState, vector):
-        (q, r), transpose, packed_structures = state
-        if transpose.value:
-            # Wide operator: not assume_independent_rows never fires for a
-            # full-rank solver when rows <= columns, so this path is unreachable.
-            return NotImplemented
-        # Tall A = QR: (A^H A)^{-1} v = R^{-1} R^{-H} v.  Q^H Q = I cancels.
-        transposed_ps = transpose_packed_structures(packed_structures)
-        w = ravel_vector(vector, transposed_ps)
-        # trans="C" gives R^{-H} (conjugate-transpose solve); correct for complex R.
-        rHw = jsp.linalg.solve_triangular(r, w, trans="C", unit_diagonal=False)
-        result = jsp.linalg.solve_triangular(r, rHw, unit_diagonal=False)
-        return unravel_solution(result, packed_structures)
-
-    def row_space_projection(self, state: _QRState, vector):
-        (q, r), transpose, packed_structures = state
-        if not transpose.value:
-            # Tall operator: not assume_independent_columns never fires for a
-            # full-rank solver when columns <= rows, so this path is unreachable.
-            return NotImplemented
-        # Wide A stores QR of A^T = Q₁R₁.  A^†A = Q₁^* Q₁^T — two matvecs, no solve.
-        # (Derived: A^† = Q₁^* R₁^{-T}; A^†A = Q₁^* Q₁^T since R₁^{-T} R₁^T = I.)
-        transposed_ps = transpose_packed_structures(packed_structures)
-        w = ravel_vector(vector, transposed_ps)
-        result = q.conj() @ (q.T @ w)
-        return unravel_solution(result, packed_structures)
-
     def assume_full_rank(self):
         return True
 
@@ -141,3 +114,34 @@ QR.__init__.__doc__ = """**Arguments:**
 
 Nothing.
 """
+
+
+@_gram_inverse_mv.register(QR)
+def _(solver, state: _QRState, vector):
+    (q, r), transpose, packed_structures = state
+    if transpose.value:
+        # Wide operator: not assume_independent_rows never fires for a
+        # full-rank solver when rows <= columns, so this path is unreachable.
+        return NotImplemented
+    # Tall A = QR: (A^H A)^{-1} v = R^{-1} R^{-H} v.  Q^H Q = I cancels.
+    transposed_ps = transpose_packed_structures(packed_structures)
+    w = ravel_vector(vector, transposed_ps)
+    # trans="C" gives R^{-H} (conjugate-transpose solve); correct for complex R.
+    rHw = jsp.linalg.solve_triangular(r, w, trans="C", unit_diagonal=False)
+    result = jsp.linalg.solve_triangular(r, rHw, unit_diagonal=False)
+    return unravel_solution(result, packed_structures)
+
+
+@_row_space_projection.register(QR)
+def _(solver, state: _QRState, vector):
+    (q, r), transpose, packed_structures = state
+    if not transpose.value:
+        # Tall operator: not assume_independent_columns never fires for a
+        # full-rank solver when columns <= rows, so this path is unreachable.
+        return NotImplemented
+    # Wide A stores QR of A^T = Q₁R₁.  A^†A = Q₁^* Q₁^T — two matvecs, no solve.
+    # (Derived: A^† = Q₁^* R₁^{-T}; A^†A = Q₁^* Q₁^T since R₁^{-T} R₁^T = I.)
+    transposed_ps = transpose_packed_structures(packed_structures)
+    w = ravel_vector(vector, transposed_ps)
+    result = q.conj() @ (q.T @ w)
+    return unravel_solution(result, packed_structures)

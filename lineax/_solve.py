@@ -213,7 +213,7 @@ def _linear_solve_jvp(primals, tangents):
             tmp = t_operator_conj_transpose.mv(lst_sqr_diff)  # pyright: ignore
             # Fast path: A†(Aᵀ)†w = (AᵀA)†w directly (e.g. R⁻¹R⁻ᵀw for QR,
             # VΣ⁻²Vᵀw for SVD).  Q/U matvecs cancel; avoids round-trip through ℝᵐ.
-            gram_inv = solver.gram_inverse_mv(state, tmp)
+            gram_inv = _gram_inverse_mv(solver, state, tmp)
             if gram_inv is NotImplemented:
                 tmp, _, _ = eqxi.filter_primitive_bind(
                     linear_solve_p,
@@ -242,7 +242,7 @@ def _linear_solve_jvp(primals, tangents):
             tmp2 = t_operator_conj_transpose.mv(tmp1)  # pyright: ignore
             # tmp2 is the y term
             # Fast path: A†Ay = QQᵀy for QR, VVᵀy for SVD (Σ cancels entirely).
-            proj = solver.row_space_projection(state, tmp2)
+            proj = _row_space_projection(solver, state, tmp2)
             if proj is NotImplemented:
                 tmp3 = operator.mv(tmp2)
                 tmp4 = (-(tmp3**ω)).ω
@@ -479,61 +479,33 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         Either `True` or `False`.
         """
 
-    def gram_inverse_mv(self, state: _SolverState, vector: PyTree[Array]):
-        """Compute $A^\\dagger (A^\\top)^\\dagger v = (A^\\top A)^\\dagger v$ directly.
 
-        This is an optimisation hook used in the JVP rule for the
-        `not assume_independent_rows` branch (overdetermined / tall systems).
-        Implementing this avoids a round-trip through the larger ambient space
-        $\\mathbb{R}^m$ and saves two O(mn) matvecs.
+# These optimisation hooks are singledispatch functions rather than methods on
+# AbstractLinearSolver, following the same pattern as the operator utilities in
+# _operator.py.  This keeps AbstractLinearSolver clean and lets third-party
+# solver types register fast paths without editing the base class.
 
-        For QR (tall): $(A^\\top A)^{-1} v = R^{-1} R^{-\\top} v$ — two
-        triangular solves, $Q^\\top Q = I$ cancels.
 
-        For SVD (any rank): $V \\Sigma^{-2} V^\\top v$ — $U^\\top U = I$ cancels.
+@ft.singledispatch
+def _gram_inverse_mv(solver: "AbstractLinearSolver", state, vector):
+    """Compute $(A^H A)^\\dagger v$ directly, or return `NotImplemented`.
 
-        Returning `NotImplemented` (the default) falls back to the generic
-        two-solve path in `_linear_solve_jvp`.
+    Used in `_linear_solve_jvp` for the `not assume_independent_rows` branch.
+    Falls back to the generic two-solve chain when `NotImplemented` is returned.
+    Register a fast path via `@_gram_inverse_mv.register(MySolverClass)`.
+    """
+    return NotImplemented
 
-        **Arguments:**
 
-        - `state`: as returned from `solver.init`.
-        - `vector`: a vector in the *input* space of the operator (i.e. in
-            $\\mathbb{R}^n$ for an $m \\times n$ operator).
+@ft.singledispatch
+def _row_space_projection(solver: "AbstractLinearSolver", state, vector):
+    """Compute $A^\\dagger A v$ directly, or return `NotImplemented`.
 
-        **Returns:**
-
-        $A^\\dagger (A^\\top)^\\dagger v$ in the input space, or `NotImplemented`.
-        """
-        return NotImplemented
-
-    def row_space_projection(self, state: _SolverState, vector: PyTree[Array]):
-        """Compute the row-space projection $A^\\dagger A v$ directly.
-
-        This is an optimisation hook used in the JVP rule for the
-        `not assume_independent_columns` branch (underdetermined / wide systems).
-        Implementing this avoids an extra matvec with $A$ and removes the
-        $-Av$ term from the outer $A^\\dagger$ solve.
-
-        For QR (wide): $A^\\dagger A = Q_1 Q_1^\\top$ where $Q_1$ is the QR
-        factor of $A^\\top$ — just two matvecs, no triangular solve.
-
-        For SVD (any rank): $A^\\dagger A = V V^\\top v$ — $\\Sigma^{-1}$
-        cancels entirely.
-
-        Returning `NotImplemented` (the default) falls back to the generic
-        matvec-then-solve path in `_linear_solve_jvp`.
-
-        **Arguments:**
-
-        - `state`: as returned from `solver.init`.
-        - `vector`: a vector in the *input* space of the operator.
-
-        **Returns:**
-
-        $A^\\dagger A v$ in the input space, or `NotImplemented`.
-        """
-        return NotImplemented
+    Used in `_linear_solve_jvp` for the `not assume_independent_columns` branch.
+    Falls back to the generic matvec+solve path when `NotImplemented` is returned.
+    Register a fast path via `@_row_space_projection.register(MySolverClass)`.
+    """
+    return NotImplemented
 
 
 _qr_token = eqxi.str2jax("qr_token")

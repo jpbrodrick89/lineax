@@ -20,7 +20,7 @@ from jaxtyping import Array, PyTree
 
 from .._operator import conj, linearise, materialise, TaggedLinearOperator
 from .._solution import RESULTS
-from .._solve import AbstractLinearOperator, AbstractLinearSolver
+from .._solve import _gram_inverse_mv, AbstractLinearOperator, AbstractLinearSolver
 from .._tags import positive_semidefinite_tag
 from .cholesky import Cholesky
 
@@ -177,18 +177,6 @@ class Normal(
         )
         return state_conj, options
 
-    def gram_inverse_mv(self, state, vector):
-        inner_state, tall, operator_conj_transpose, inner_options = state
-        if not tall.value:
-            # Wide case: inner operator is AA^H, not A^H A.
-            # The gram inverse (A^H A)^{-1} is not what inner_solver computes here.
-            return NotImplemented
-        # Tall case: inner operator IS A^H A.
-        # (A^H A)^{-1} v = inner_solver.compute(inner_state, v) — one solve, no
-        # round-trip through ℝᵐ.
-        result, _, _ = self.inner_solver.compute(inner_state, vector, inner_options)
-        return result
-
     def assume_full_rank(self):
         return self.inner_solver.assume_full_rank()
 
@@ -198,3 +186,16 @@ Normal.__init__.__doc__ = """**Arguments:**
 - `inner_solver`: The solver to wrap. It should support solving positive
   definite systems or positive semidefinite systems
 """
+
+
+@_gram_inverse_mv.register(Normal)
+def _(solver: Normal, state, vector):
+    inner_state, tall, operator_conj_transpose, inner_options = state
+    if not tall.value:
+        # Wide case: inner operator is AA^H, not A^H A.
+        # The gram inverse (A^H A)^{-1} is not what inner_solver computes here.
+        return NotImplemented
+    # Tall case: inner operator IS A^H A.
+    # (A^H A)^{-1} v = inner_solver.compute — one solve, no round-trip through ℝᵐ.
+    result, _, _ = solver.inner_solver.compute(inner_state, vector, inner_options)
+    return result
