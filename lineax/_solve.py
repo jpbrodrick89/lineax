@@ -479,9 +479,7 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         Either `True` or `False`.
         """
 
-    def gram_inverse_mv(
-        self, state: _SolverState, vector: PyTree[Array]
-    ) -> "PyTree[Array] | type[NotImplemented]":
+    def gram_inverse_mv(self, state: _SolverState, vector: PyTree[Array]):
         """Compute $A^\\dagger (A^\\top)^\\dagger v = (A^\\top A)^\\dagger v$ directly.
 
         This is an optimisation hook used in the JVP rule for the
@@ -509,9 +507,7 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         """
         return NotImplemented
 
-    def row_space_projection(
-        self, state: _SolverState, vector: PyTree[Array]
-    ) -> "PyTree[Array] | type[NotImplemented]":
+    def row_space_projection(self, state: _SolverState, vector: PyTree[Array]):
         """Compute the row-space projection $A^\\dagger A v$ directly.
 
         This is an optimisation hook used in the JVP rule for the

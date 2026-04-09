@@ -105,7 +105,9 @@ class SVD(AbstractLinearSolver[_SVDState]):
         # (A^H A)^{-1} v = VΣ⁻²V^H v.  U^H U = I cancels entirely.
         s_inv_sq = jnp.where(mask, 1.0 / safe_s**2, 0).astype(vt.dtype)
         vt_w = jnp.matmul(vt, w, precision=lax.Precision.HIGHEST)
-        result = jnp.matmul(vt.conj().T, s_inv_sq * vt_w, precision=lax.Precision.HIGHEST)
+        result = jnp.matmul(
+            vt.conj().T, s_inv_sq * vt_w, precision=lax.Precision.HIGHEST
+        )
         return unravel_solution(result, packed_structures)
 
     def row_space_projection(self, state: _SVDState, vector):
