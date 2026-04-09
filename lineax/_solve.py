@@ -211,16 +211,23 @@ def _linear_solve_jvp(primals, tangents):
         if not assume_independent_rows:
             lst_sqr_diff = (vector**ω - operator.mv(solution) ** ω).ω
             tmp = t_operator_conj_transpose.mv(lst_sqr_diff)  # pyright: ignore
-            tmp, _, _ = eqxi.filter_primitive_bind(
-                linear_solve_p,
-                operator_conj_transpose,  # pyright: ignore
-                state_conj_transpose,  # pyright: ignore
-                tmp,
-                options_conj_transpose,  # pyright: ignore
-                solver,
-                True,
-            )
-            vecs.append(tmp)
+            # Fast path: A†(Aᵀ)†w = (AᵀA)†w directly (e.g. R⁻¹R⁻ᵀw for QR,
+            # VΣ⁻²Vᵀw for SVD).  Q/U matvecs cancel; avoids round-trip through ℝᵐ.
+            gram_inv = solver.gram_inverse_mv(state, tmp)
+            if gram_inv is NotImplemented:
+                tmp, _, _ = eqxi.filter_primitive_bind(
+                    linear_solve_p,
+                    operator_conj_transpose,  # pyright: ignore
+                    state_conj_transpose,  # pyright: ignore
+                    tmp,
+                    options_conj_transpose,  # pyright: ignore
+                    solver,
+                    True,
+                )
+                vecs.append(tmp)
+            else:
+                # Result already lives in input space; bypass outer A† for this term.
+                sols.append(gram_inv)
 
         if not assume_independent_columns:
             tmp1, _, _ = eqxi.filter_primitive_bind(
@@ -234,10 +241,16 @@ def _linear_solve_jvp(primals, tangents):
             )
             tmp2 = t_operator_conj_transpose.mv(tmp1)  # pyright: ignore
             # tmp2 is the y term
-            tmp3 = operator.mv(tmp2)
-            tmp4 = (-(tmp3**ω)).ω
-            # tmp4 is the Ay term
-            vecs.append(tmp4)
+            # Fast path: A†Ay = QQᵀy for QR, VVᵀy for SVD (Σ cancels entirely).
+            proj = solver.row_space_projection(state, tmp2)
+            if proj is NotImplemented:
+                tmp3 = operator.mv(tmp2)
+                tmp4 = (-(tmp3**ω)).ω
+                # tmp4 is the -Ay term; outer A† will give -A†Ay
+                vecs.append(tmp4)
+            else:
+                # Projection already computed; add -A†Ay directly.
+                sols.append((-(proj**ω)).ω)
             sols.append(tmp2)
     vecs = jtu.tree_map(_sum, *vecs)
     # the A^ term at the very beginning
@@ -466,6 +479,66 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
 
         Either `True` or `False`.
         """
+
+    def gram_inverse_mv(
+        self, state: _SolverState, vector: PyTree[Array]
+    ) -> "PyTree[Array] | type[NotImplemented]":
+        """Compute $A^\\dagger (A^\\top)^\\dagger v = (A^\\top A)^\\dagger v$ directly.
+
+        This is an optimisation hook used in the JVP rule for the
+        `not assume_independent_rows` branch (overdetermined / tall systems).
+        Implementing this avoids a round-trip through the larger ambient space
+        $\\mathbb{R}^m$ and saves two O(mn) matvecs.
+
+        For QR (tall): $(A^\\top A)^{-1} v = R^{-1} R^{-\\top} v$ — two
+        triangular solves, $Q^\\top Q = I$ cancels.
+
+        For SVD (any rank): $V \\Sigma^{-2} V^\\top v$ — $U^\\top U = I$ cancels.
+
+        Returning `NotImplemented` (the default) falls back to the generic
+        two-solve path in `_linear_solve_jvp`.
+
+        **Arguments:**
+
+        - `state`: as returned from `solver.init`.
+        - `vector`: a vector in the *input* space of the operator (i.e. in
+            $\\mathbb{R}^n$ for an $m \\times n$ operator).
+
+        **Returns:**
+
+        $A^\\dagger (A^\\top)^\\dagger v$ in the input space, or `NotImplemented`.
+        """
+        return NotImplemented
+
+    def row_space_projection(
+        self, state: _SolverState, vector: PyTree[Array]
+    ) -> "PyTree[Array] | type[NotImplemented]":
+        """Compute the row-space projection $A^\\dagger A v$ directly.
+
+        This is an optimisation hook used in the JVP rule for the
+        `not assume_independent_columns` branch (underdetermined / wide systems).
+        Implementing this avoids an extra matvec with $A$ and removes the
+        $-Av$ term from the outer $A^\\dagger$ solve.
+
+        For QR (wide): $A^\\dagger A = Q_1 Q_1^\\top$ where $Q_1$ is the QR
+        factor of $A^\\top$ — just two matvecs, no triangular solve.
+
+        For SVD (any rank): $A^\\dagger A = V V^\\top v$ — $\\Sigma^{-1}$
+        cancels entirely.
+
+        Returning `NotImplemented` (the default) falls back to the generic
+        matvec-then-solve path in `_linear_solve_jvp`.
+
+        **Arguments:**
+
+        - `state`: as returned from `solver.init`.
+        - `vector`: a vector in the *input* space of the operator.
+
+        **Returns:**
+
+        $A^\\dagger A v$ in the input space, or `NotImplemented`.
+        """
+        return NotImplemented
 
 
 _qr_token = eqxi.str2jax("qr_token")

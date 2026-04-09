@@ -92,6 +92,43 @@ class SVD(AbstractLinearSolver[_SVDState]):
         conj_options = {}
         return conj_state, conj_options
 
+    def gram_inverse_mv(self, state: _SVDState, vector):
+        (u, s, vt), packed_structures = state
+        m = u.shape[0]
+        n = vt.shape[1]
+        # vector is in the input space (ℝⁿ).
+        transposed_ps = transpose_packed_structures(packed_structures)
+        w = ravel_vector(vector, transposed_ps)
+        rcond = resolve_rcond(self.rcond, n, m, s.dtype)
+        rcond = jnp.array(rcond, dtype=s.dtype)
+        if s.size > 0:
+            rcond = rcond * s[0]
+        mask = s > rcond
+        safe_s = jnp.where(mask, s, 1)
+        # A†(Aᵀ)† = VΣ⁻¹(UᵀU)Σ⁻¹Vᵀ = VΣ⁻²Vᵀ.  U never appears.
+        s_inv_sq = jnp.where(mask, 1.0 / safe_s**2, 0).astype(vt.dtype)
+        vt_w = jnp.matmul(vt, w, precision=lax.Precision.HIGHEST)
+        result = jnp.matmul(vt.conj().T, s_inv_sq * vt_w, precision=lax.Precision.HIGHEST)
+        return unravel_solution(result, packed_structures)
+
+    def row_space_projection(self, state: _SVDState, vector):
+        (u, s, vt), packed_structures = state
+        m = u.shape[0]
+        n = vt.shape[1]
+        # vector is in the input space (ℝⁿ).
+        transposed_ps = transpose_packed_structures(packed_structures)
+        w = ravel_vector(vector, transposed_ps)
+        rcond = resolve_rcond(self.rcond, n, m, s.dtype)
+        rcond = jnp.array(rcond, dtype=s.dtype)
+        if s.size > 0:
+            rcond = rcond * s[0]
+        mask = s > rcond
+        # A†A = V(Σ⁻¹Uᵀ)(UΣ)Vᵀ = VVᵀ (restricted to row space).  Σ cancels.
+        vt_w = jnp.matmul(vt, w, precision=lax.Precision.HIGHEST)
+        masked_vt_w = jnp.where(mask, vt_w, 0)
+        result = jnp.matmul(vt.conj().T, masked_vt_w, precision=lax.Precision.HIGHEST)
+        return unravel_solution(result, packed_structures)
+
     def assume_full_rank(self):
         return False
 

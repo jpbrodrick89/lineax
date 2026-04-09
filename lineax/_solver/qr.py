@@ -106,6 +106,35 @@ class QR(AbstractLinearSolver):
         conj_options = {}
         return conj_state, conj_options
 
+    def gram_inverse_mv(self, state: _QRState, vector):
+        (q, r), transpose, packed_structures = state
+        if transpose.value:
+            # Wide operator: not assume_independent_rows never fires for a
+            # full-rank solver when rows <= columns, so this path is unreachable.
+            return NotImplemented
+        # Tall operator A = QR.  A†(Aᵀ)† = R⁻¹(QᵀQ)R⁻ᵀ = R⁻¹R⁻ᵀ.
+        # vector lives in the input space (ℝⁿ); use transposed packed_structures.
+        transposed_ps = transpose_packed_structures(packed_structures)
+        w = ravel_vector(vector, transposed_ps)
+        # Two triangular solves; Qᵀ Q = I so Q never appears.
+        rTw = jsp.linalg.solve_triangular(r, w, trans="T", unit_diagonal=False)
+        result = jsp.linalg.solve_triangular(r, rTw, unit_diagonal=False)
+        return unravel_solution(result, packed_structures)
+
+    def row_space_projection(self, state: _QRState, vector):
+        (q, r), transpose, packed_structures = state
+        if not transpose.value:
+            # Tall operator: not assume_independent_columns never fires for a
+            # full-rank solver when columns <= rows, so this path is unreachable.
+            return NotImplemented
+        # Wide operator: internally stores QR of Aᵀ = Q₁R₁ (Q₁ is n×m).
+        # A†A = Q₁Q₁ᵀ — two matvecs, no triangular solve.
+        # vector lives in the input space (ℝⁿ).
+        transposed_ps = transpose_packed_structures(packed_structures)
+        w = ravel_vector(vector, transposed_ps)
+        result = q.conj() @ (q.T @ w)
+        return unravel_solution(result, packed_structures)
+
     def assume_full_rank(self):
         return True
 
