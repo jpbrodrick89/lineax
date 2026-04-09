@@ -120,9 +120,11 @@ Nothing.
 def _(solver, state: _QRState, vector):
     (q, r), transpose, packed_structures = state
     if transpose.value:
-        # Wide operator: not assume_independent_rows never fires for a
-        # full-rank solver when rows <= columns, so this path is unreachable.
-        return NotImplemented
+        # Should be unreachable: QR.assume_full_rank() is True, so
+        # assume_independent_rows is always True for wide operators.
+        raise NotImplementedError(
+            "Please open a GitHub issue: https://github.com/google/lineax"
+        )
     # Tall A = QR: (A^H A)^{-1} v = R^{-1} R^{-H} v.  Q^H Q = I cancels.
     transposed_ps = transpose_packed_structures(packed_structures)
     w = ravel_vector(vector, transposed_ps)
@@ -136,9 +138,11 @@ def _(solver, state: _QRState, vector):
 def _(solver, state: _QRState, vector):
     (q, r), transpose, packed_structures = state
     if not transpose.value:
-        # Tall operator: not assume_independent_columns never fires for a
-        # full-rank solver when columns <= rows, so this path is unreachable.
-        return NotImplemented
+        # Should be unreachable: QR.assume_full_rank() is True, so
+        # assume_independent_columns is always True for tall operators.
+        raise NotImplementedError(
+            "Please open a GitHub issue: https://github.com/google/lineax"
+        )
     # Wide A stores QR of A^T = Q₁R₁.  A^†A = Q₁^* Q₁^T — two matvecs, no solve.
     # (Derived: A^† = Q₁^* R₁^{-T}; A^†A = Q₁^* Q₁^T since R₁^{-T} R₁^T = I.)
     transposed_ps = transpose_packed_structures(packed_structures)
