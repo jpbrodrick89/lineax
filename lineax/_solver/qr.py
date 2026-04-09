@@ -112,13 +112,12 @@ class QR(AbstractLinearSolver):
             # Wide operator: not assume_independent_rows never fires for a
             # full-rank solver when rows <= columns, so this path is unreachable.
             return NotImplemented
-        # Tall operator A = QR.  A†(Aᵀ)† = R⁻¹(QᵀQ)R⁻ᵀ = R⁻¹R⁻ᵀ.
-        # vector lives in the input space (ℝⁿ); use transposed packed_structures.
+        # Tall A = QR: (A^H A)^{-1} v = R^{-1} R^{-H} v.  Q^H Q = I cancels.
         transposed_ps = transpose_packed_structures(packed_structures)
         w = ravel_vector(vector, transposed_ps)
-        # Two triangular solves; Qᵀ Q = I so Q never appears.
-        rTw = jsp.linalg.solve_triangular(r, w, trans="T", unit_diagonal=False)
-        result = jsp.linalg.solve_triangular(r, rTw, unit_diagonal=False)
+        # trans="C" gives R^{-H} (conjugate-transpose solve); correct for complex R.
+        rHw = jsp.linalg.solve_triangular(r, w, trans="C", unit_diagonal=False)
+        result = jsp.linalg.solve_triangular(r, rHw, unit_diagonal=False)
         return unravel_solution(result, packed_structures)
 
     def row_space_projection(self, state: _QRState, vector):
@@ -127,9 +126,8 @@ class QR(AbstractLinearSolver):
             # Tall operator: not assume_independent_columns never fires for a
             # full-rank solver when columns <= rows, so this path is unreachable.
             return NotImplemented
-        # Wide operator: internally stores QR of Aᵀ = Q₁R₁ (Q₁ is n×m).
-        # A†A = Q₁Q₁ᵀ — two matvecs, no triangular solve.
-        # vector lives in the input space (ℝⁿ).
+        # Wide A stores QR of A^T = Q₁R₁.  A^†A = Q₁^* Q₁^T — two matvecs, no solve.
+        # (Derived: A^† = Q₁^* R₁^{-T}; A^†A = Q₁^* Q₁^T since R₁^{-T} R₁^T = I.)
         transposed_ps = transpose_packed_structures(packed_structures)
         w = ravel_vector(vector, transposed_ps)
         result = q.conj() @ (q.T @ w)

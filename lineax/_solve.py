@@ -246,7 +246,6 @@ def _linear_solve_jvp(primals, tangents):
             if proj is NotImplemented:
                 tmp3 = operator.mv(tmp2)
                 tmp4 = (-(tmp3**ω)).ω
-                # tmp4 is the -Ay term; outer A† will give -A†Ay
                 vecs.append(tmp4)
             else:
                 # Projection already computed; add -A†Ay directly.
