@@ -20,7 +20,12 @@ from jaxtyping import Array, PyTree
 
 from .._operator import conj, linearise, materialise, TaggedLinearOperator
 from .._solution import RESULTS
-from .._solve import _gram_inverse_mv, AbstractLinearOperator, AbstractLinearSolver
+from .._solve import (
+    _gram_inverse_mv,
+    _row_space_projection,
+    AbstractLinearOperator,
+    AbstractLinearSolver,
+)
 from .._tags import positive_semidefinite_tag
 from .cholesky import Cholesky
 
@@ -207,3 +212,22 @@ def _(solver: Normal, state, vector):
     # (A^H A)^{-1} v = inner_solver.compute — one solve, no round-trip through ℝᵐ.
     result, _, _ = solver.inner_solver.compute(inner_state, vector, inner_options)
     return result
+
+
+@_row_space_projection.register(Normal)
+def _(solver: Normal, state, vector):
+    inner_state, tall, operator_conj_transpose, inner_options = state
+    if not tall.value:
+        # Wide case: A†A cannot be computed from the stored AA^H factorization
+        # alone (result lives in ℝⁿ, state in ℝᵐ).
+        return NotImplemented
+    if solver.inner_solver.assume_full_rank():
+        # Should be unreachable: full-rank tall Normal has
+        # assume_independent_columns = True, so _row_space_projection is never called.
+        raise NotImplementedError(
+            "Please open a GitHub issue: https://github.com/google/lineax"
+        )
+    # Tall rank-deficient case: inner operator IS A^H A.
+    # A†A v = (A^H A)†(A^H A) v — same row space — so delegate to the inner
+    # solver's row_space_projection (returns NotImplemented if not registered).
+    return _row_space_projection(solver.inner_solver, inner_state, vector)
