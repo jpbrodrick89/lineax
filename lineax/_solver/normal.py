@@ -177,6 +177,31 @@ class Normal(
         )
         return state_conj, options
 
+    def gram_inverse_mv(self, state, vector):
+        inner_state, tall, operator_conj_transpose, inner_options = state
+        if not tall.value:
+            # Wide case: inner operator is AA^H, not A^H A.
+            # The gram inverse (A^H A)^{-1} is not what inner_solver computes here.
+            return NotImplemented
+        # Tall case: inner operator IS A^H A.
+        # (A^H A)^{-1} v = inner_solver.compute(inner_state, v) — one solve, no
+        # round-trip through ℝᵐ.
+        result, _, _ = self.inner_solver.compute(inner_state, vector, inner_options)
+        return result
+
+    def row_space_projection(self, state, vector):
+        inner_state, tall, operator_conj_transpose, inner_options = state
+        if tall.value:
+            # Tall case: inner operator is A^H A, handled by gram_inverse_mv.
+            return NotImplemented
+        # Wide case: A†Ay = A^H (AA^H)^{-1} A y.
+        # Recover A from stored A^H = operator_conj_transpose:
+        #   conj(A^H.T) = conj(conj(A)) = A.
+        operator = conj(operator_conj_transpose.transpose())
+        Ay = operator.mv(vector)
+        inv_Ay, _, _ = self.inner_solver.compute(inner_state, Ay, inner_options)
+        return operator_conj_transpose.mv(inv_Ay)
+
     def assume_full_rank(self):
         return self.inner_solver.assume_full_rank()
 
