@@ -2127,10 +2127,10 @@ def _(operator):
 @has_unit_diagonal.register(MulLinearOperator)
 @has_unit_diagonal.register(DivLinearOperator)
 def _(operator):
-    try:
-        return float(operator.scalar) == 1.0 and has_unit_diagonal(operator.operator)
-    except Exception:
+    scalar = operator.scalar
+    if not isinstance(scalar, (int, float, np.ndarray, np.generic)):
         return False
+    return float(scalar) == 1.0 and has_unit_diagonal(operator.operator)
 
 
 class _ScalarSign(enum.Enum):
@@ -2141,11 +2141,10 @@ class _ScalarSign(enum.Enum):
 
 
 def _scalar_sign(scalar) -> _ScalarSign:
-    """Returns the sign of a scalar, or unknown for traced JAX values."""
-    try:
-        scalar = float(scalar)
-    except Exception:
+    """Returns the sign of a scalar, or unknown for JAX arrays."""
+    if not isinstance(scalar, (int, float, np.ndarray, np.generic)):
         return _ScalarSign.unknown
+    scalar = float(scalar)
     if scalar > 0:
         return _ScalarSign.positive
     elif scalar < 0:
