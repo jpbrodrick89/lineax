@@ -208,8 +208,7 @@ class AbstractLinearOperator(eqx.Module):
         return AddLinearOperator(self, -other)
 
     def __mul__(self, other) -> "AbstractLinearOperator":
-        other = jnp.asarray(other)
-        if other.shape != ():
+        if np.ndim(other) != 0:
             raise ValueError("Can only multiply AbstractLinearOperators by scalars.")
         return MulLinearOperator(self, other)
 
@@ -222,8 +221,7 @@ class AbstractLinearOperator(eqx.Module):
         return ComposedLinearOperator(self, other)
 
     def __truediv__(self, other) -> "AbstractLinearOperator":
-        other = jnp.asarray(other)
-        if other.shape != ():
+        if np.ndim(other) != 0:
             raise ValueError("Can only divide AbstractLinearOperators by scalars.")
         return DivLinearOperator(self, other)
 
@@ -1043,7 +1041,7 @@ class MulLinearOperator(AbstractLinearOperator):
     """
 
     operator: AbstractLinearOperator
-    scalar: Scalar
+    scalar: ArrayLike
 
     def mv(self, vector):
         return (self.operator.mv(vector) ** ω * self.scalar).ω
@@ -1105,7 +1103,7 @@ class DivLinearOperator(AbstractLinearOperator):
     """
 
     operator: AbstractLinearOperator
-    scalar: Scalar
+    scalar: ArrayLike
 
     def mv(self, vector):
         with jax.numpy_dtype_promotion("standard"):
