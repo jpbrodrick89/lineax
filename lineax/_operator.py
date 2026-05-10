@@ -2375,9 +2375,15 @@ def _(operator):
     return conj(operator.operator1) + conj(operator.operator2)
 
 
+def _scalar_conj(scalar):
+    if isinstance(scalar, (int, float, np.ndarray, np.generic)):
+        return np.conj(scalar)
+    return jnp.conj(scalar)
+
+
 @conj.register(MulLinearOperator)
 def _(operator):
-    return conj(operator.operator) * jnp.conj(operator.scalar)
+    return conj(operator.operator) * _scalar_conj(operator.scalar)
 
 
 @conj.register(NegLinearOperator)
@@ -2387,7 +2393,7 @@ def _(operator):
 
 @conj.register(DivLinearOperator)
 def _(operator):
-    return conj(operator.operator) / jnp.conj(operator.scalar)
+    return conj(operator.operator) / _scalar_conj(operator.scalar)
 
 
 @conj.register(ComposedLinearOperator)
