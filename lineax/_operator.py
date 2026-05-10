@@ -35,6 +35,7 @@ from jaxtyping import (
     Inexact,
     PyTree,  # pyright: ignore
     Scalar,
+    ScalarLike,
     Shaped,
 )
 
@@ -1041,7 +1042,7 @@ class MulLinearOperator(AbstractLinearOperator):
     """
 
     operator: AbstractLinearOperator
-    scalar: ArrayLike
+    scalar: ScalarLike
 
     def mv(self, vector):
         return (self.operator.mv(vector) ** ω * self.scalar).ω
@@ -1103,7 +1104,7 @@ class DivLinearOperator(AbstractLinearOperator):
     """
 
     operator: AbstractLinearOperator
-    scalar: ArrayLike
+    scalar: ScalarLike
 
     def mv(self, vector):
         with jax.numpy_dtype_promotion("standard"):
