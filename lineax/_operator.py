@@ -2141,16 +2141,17 @@ class _ScalarSign(enum.Enum):
 
 
 def _scalar_sign(scalar) -> _ScalarSign:
-    """Returns the sign of a scalar, or unknown for JAX arrays."""
-    if not isinstance(scalar, (int, float, np.ndarray, np.generic)):
-        return _ScalarSign.unknown
-    scalar = float(scalar)
-    if scalar > 0:
-        return _ScalarSign.positive
-    elif scalar < 0:
-        return _ScalarSign.negative
+    """Returns the sign of a scalar, or unknown for JAX tracers."""
+    if isinstance(scalar, (int, float, np.ndarray, np.generic)):
+        scalar = float(scalar)
+        if scalar > 0:
+            return _ScalarSign.positive
+        elif scalar < 0:
+            return _ScalarSign.negative
+        else:
+            return _ScalarSign.zero
     else:
-        return _ScalarSign.zero
+        return _ScalarSign.unknown
 
 
 # PSD/NSD for MulLinearOperator: depends on sign of scalar
