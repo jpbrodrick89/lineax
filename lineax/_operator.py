@@ -2119,12 +2119,20 @@ for check in (
         return check(operator.operator)
 
 
-# has_unit_diagonal is NOT preserved by scaling or negation
-@has_unit_diagonal.register(MulLinearOperator)
+# has_unit_diagonal is NOT preserved by negation
 @has_unit_diagonal.register(NegLinearOperator)
-@has_unit_diagonal.register(DivLinearOperator)
 def _(operator):
     return False
+
+
+# has_unit_diagonal is preserved by scaling/dividing only when scalar == 1
+@has_unit_diagonal.register(MulLinearOperator)
+@has_unit_diagonal.register(DivLinearOperator)
+def _(operator):
+    try:
+        return float(operator.scalar) == 1.0 and has_unit_diagonal(operator.operator)
+    except Exception:
+        return False
 
 
 class _ScalarSign(enum.Enum):
@@ -2135,17 +2143,17 @@ class _ScalarSign(enum.Enum):
 
 
 def _scalar_sign(scalar) -> _ScalarSign:
-    """Returns the sign of a scalar, or unknown for JAX tracers."""
-    if isinstance(scalar, (int, float, np.ndarray, np.generic)):
+    """Returns the sign of a scalar, or unknown for traced JAX values."""
+    try:
         scalar = float(scalar)
-        if scalar > 0:
-            return _ScalarSign.positive
-        elif scalar < 0:
-            return _ScalarSign.negative
-        else:
-            return _ScalarSign.zero
-    else:
+    except Exception:
         return _ScalarSign.unknown
+    if scalar > 0:
+        return _ScalarSign.positive
+    elif scalar < 0:
+        return _ScalarSign.negative
+    else:
+        return _ScalarSign.zero
 
 
 # PSD/NSD for MulLinearOperator: depends on sign of scalar
