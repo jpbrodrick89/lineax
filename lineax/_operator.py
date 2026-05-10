@@ -34,7 +34,6 @@ from jaxtyping import (
     ArrayLike,
     Inexact,
     PyTree,  # pyright: ignore
-    Scalar,
     ScalarLike,
     Shaped,
 )
