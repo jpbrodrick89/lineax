@@ -2377,7 +2377,7 @@ def _(operator):
 
 @conj.register(MulLinearOperator)
 def _(operator):
-    return conj(operator.operator) * operator.scalar.conj()
+    return conj(operator.operator) * jnp.conj(operator.scalar)
 
 
 @conj.register(NegLinearOperator)
@@ -2387,7 +2387,7 @@ def _(operator):
 
 @conj.register(DivLinearOperator)
 def _(operator):
-    return conj(operator.operator) / operator.scalar.conj()
+    return conj(operator.operator) / jnp.conj(operator.scalar)
 
 
 @conj.register(ComposedLinearOperator)
