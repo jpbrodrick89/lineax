@@ -48,16 +48,8 @@ from ._operator import (
 )
 from ._solution import RESULTS, Solution
 from ._tags import (
-    diagonal_tag,
     invert_tags,
-    lower_triangular_tag,
-    negative_semidefinite_tag,
-    positive_semidefinite_tag,
-    symmetric_tag,
     tags_from_checks,
-    tridiagonal_tag,
-    unit_diagonal_tag,
-    upper_triangular_tag,
 )
 
 
@@ -853,20 +845,7 @@ def invert(
             throw=throw,
         ).value
 
-    effective_tags = tags_from_checks(
-        operator,
-        [
-            (is_symmetric, symmetric_tag),
-            (is_diagonal, diagonal_tag),
-            (is_lower_triangular, lower_triangular_tag),
-            (is_upper_triangular, upper_triangular_tag),
-            (is_positive_semidefinite, positive_semidefinite_tag),
-            (is_negative_semidefinite, negative_semidefinite_tag),
-            (has_unit_diagonal, unit_diagonal_tag),
-            (is_tridiagonal, tridiagonal_tag),
-        ],
-    )
-    tags = invert_tags(effective_tags)
+    tags = invert_tags(tags_from_checks(operator))
     return FunctionLinearOperator(solve_fn, operator.out_structure(), tags)
 
 

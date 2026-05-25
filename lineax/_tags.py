@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable, Iterable
 from typing import Any
 
 
@@ -34,30 +33,52 @@ positive_semidefinite_tag = _HasRepr("positive_semidefinite_tag")
 negative_semidefinite_tag = _HasRepr("negative_semidefinite_tag")
 
 
-def tags_from_checks(
-    operator: Any,
-    check_tag_pairs: Iterable[tuple[Callable[..., bool], object]],
-) -> frozenset[object]:
+def tags_from_checks(operator: Any) -> frozenset[object]:
     """Lineax uses "tags" to declare that a particular linear operator exhibits some
     property, e.g. symmetry.
 
-    This function collects tags for an operator by evaluating a sequence of
-    `(check, tag)` pairs and returning a frozenset of the tags whose check returns
-    `True`.  The checks are typically the singledispatch predicate functions
-    (`is_symmetric`, `is_diagonal`, etc.) defined in `lineax._operator`.
+    This function inspects an operator using all standard property checks and
+    returns a frozenset of the tags that apply to it.  It is the canonical way
+    to collect the full set of tags for any operator, regardless of whether that
+    operator stores its properties as an explicit `.tags` frozenset or encodes
+    them structurally (e.g. `DiagonalLinearOperator`).
 
     **Arguments:**
 
     - `operator`: the linear operator to inspect.
-    - `check_tag_pairs`: an iterable of `(check, tag)` tuples.  For each pair,
-      `check(operator)` is called and the corresponding `tag` is included in the
-      result if it returns `True`.
 
     **Returns:**
 
     A `frozenset` of tags.
     """
-    return frozenset(tag for check, tag in check_tag_pairs if check(operator))
+    # Lazy import to avoid a circular dependency: _operator.py imports _tags.py
+    # at module level, so we defer the reverse import to call time when both
+    # modules are fully initialised.
+    from ._operator import (
+        has_unit_diagonal,
+        is_diagonal,
+        is_lower_triangular,
+        is_negative_semidefinite,
+        is_positive_semidefinite,
+        is_symmetric,
+        is_tridiagonal,
+        is_upper_triangular,
+    )
+
+    return frozenset(
+        tag
+        for check, tag in [
+            (is_symmetric, symmetric_tag),
+            (is_diagonal, diagonal_tag),
+            (is_lower_triangular, lower_triangular_tag),
+            (is_upper_triangular, upper_triangular_tag),
+            (is_positive_semidefinite, positive_semidefinite_tag),
+            (is_negative_semidefinite, negative_semidefinite_tag),
+            (has_unit_diagonal, unit_diagonal_tag),
+            (is_tridiagonal, tridiagonal_tag),
+        ]
+        if check(operator)
+    )
 
 
 transpose_tags_rules = []
