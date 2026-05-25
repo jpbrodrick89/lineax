@@ -69,10 +69,13 @@ from ._solver import (
 )
 from ._tags import (
     diagonal_tag as diagonal_tag,
+    invert_tags as invert_tags,
+    invert_tags_rules as invert_tags_rules,
     lower_triangular_tag as lower_triangular_tag,
     negative_semidefinite_tag as negative_semidefinite_tag,
     positive_semidefinite_tag as positive_semidefinite_tag,
     symmetric_tag as symmetric_tag,
+    tags_from_checks as tags_from_checks,
     transpose_tags as transpose_tags,
     transpose_tags_rules as transpose_tags_rules,
     tridiagonal_tag as tridiagonal_tag,

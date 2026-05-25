@@ -49,10 +49,13 @@ from ._operator import (
 from ._solution import RESULTS, Solution
 from ._tags import (
     diagonal_tag,
+    invert_tags,
     lower_triangular_tag,
     negative_semidefinite_tag,
     positive_semidefinite_tag,
     symmetric_tag,
+    tags_from_checks,
+    tridiagonal_tag,
     unit_diagonal_tag,
     upper_triangular_tag,
 )
@@ -850,25 +853,21 @@ def invert(
             throw=throw,
         ).value
 
-    tags = {
-        tag
-        for check, tag in [
+    effective_tags = tags_from_checks(
+        operator,
+        [
             (is_symmetric, symmetric_tag),
             (is_diagonal, diagonal_tag),
             (is_lower_triangular, lower_triangular_tag),
             (is_upper_triangular, upper_triangular_tag),
             (is_positive_semidefinite, positive_semidefinite_tag),
             (is_negative_semidefinite, negative_semidefinite_tag),
-        ]
-        if check(operator)
-    }
-    if has_unit_diagonal(operator) and (
-        is_diagonal(operator)
-        or is_lower_triangular(operator)
-        or is_upper_triangular(operator)
-    ):
-        tags.add(unit_diagonal_tag)
-    return FunctionLinearOperator(solve_fn, operator.out_structure(), frozenset(tags))
+            (has_unit_diagonal, unit_diagonal_tag),
+            (is_tridiagonal, tridiagonal_tag),
+        ],
+    )
+    tags = invert_tags(effective_tags)
+    return FunctionLinearOperator(solve_fn, operator.out_structure(), tags)
 
 
 # Work around JAX issue #22011,
