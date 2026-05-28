@@ -205,6 +205,13 @@ def _(tags: frozenset[object]):
         return unit_diagonal_tag
 
 
+@invert_tags_rules.append
+def _(tags: frozenset[object]):
+    rank_tags = [t for t in tags if isinstance(t, MaxRankTag)]
+    if rank_tags:
+        return min(rank_tags, key=lambda t: t.value)
+
+
 # tridiagonal_tag intentionally absent: inverse of tridiagonal matrix generally dense.
 
 

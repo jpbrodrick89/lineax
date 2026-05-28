@@ -181,3 +181,34 @@ def test_max_rank_tagged_operator_transpose():
     inner = lx.MatrixLinearOperator(jnp.zeros((8, 8)))
     op = lx.TaggedLinearOperator(inner, lx.MaxRankTag(4))
     assert lx.max_rank(op.T) == 4
+
+
+# ---------------------------------------------------------------------------
+# Invert tags
+# ---------------------------------------------------------------------------
+
+
+def test_max_rank_invert_tags_preserves_bound():
+    from lineax._tags import invert_tags
+
+    tags = frozenset({lx.MaxRankTag(3)})
+    result = invert_tags(tags)
+    assert lx.MaxRankTag(3) in result
+
+
+def test_max_rank_invert_tags_takes_min():
+    from lineax._tags import invert_tags
+
+    tags = frozenset({lx.MaxRankTag(5), lx.MaxRankTag(2)})
+    result = invert_tags(tags)
+    rank_tags = [t for t in result if isinstance(t, lx.MaxRankTag)]
+    assert len(rank_tags) == 1
+    assert rank_tags[0].value == 2
+
+
+def test_max_rank_invert_tags_absent_when_no_rank_tag():
+    from lineax._tags import invert_tags
+
+    tags = frozenset({lx.symmetric_tag})
+    result = invert_tags(tags)
+    assert not any(isinstance(t, lx.MaxRankTag) for t in result)
