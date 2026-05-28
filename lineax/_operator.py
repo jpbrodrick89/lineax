@@ -46,6 +46,7 @@ from ._misc import (
     strip_weak_dtype,
 )
 from ._tags import (
+    MaxRankTag,
     diagonal_tag,
     lower_triangular_tag,
     negative_semidefinite_tag,
@@ -2406,3 +2407,88 @@ def _(operator):
 @conj.register(ComposedLinearOperator)
 def _(operator):
     return conj(operator.operator1) @ conj(operator.operator2)
+
+
+# max_rank
+
+
+def _max_rank_from_tags(tags: frozenset[object], fallback: int) -> int:
+    bounds = [t.value for t in tags if isinstance(t, MaxRankTag)]
+    return min(min(bounds), fallback) if bounds else fallback
+
+
+@ft.singledispatch
+def max_rank(operator: AbstractLinearOperator) -> int:
+    """Returns the maximum possible rank of the linear operator.
+
+    Returns ``min(out_size, in_size)`` when no tighter bound is known —
+    a bound that is always valid regardless of operator type.  Returns ``0``
+    for known zero operators (e.g. multiplication by a static zero scalar).
+
+    Unlike the boolean ``is_*`` tag-checking functions, this deliberately
+    does **not** raise ``NotImplementedError`` for unregistered types.
+    ``min(out_size, in_size)`` is a correct (conservative) answer for any
+    linear operator, so third-party subclasses that do not register a
+    dispatch still produce a valid result.
+
+    The return value is a plain Python ``int`` (never a JAX tracer), suitable
+    for use in solver-dispatch control flow, e.g. a future Woodbury solver
+    that checks ``max_rank(operator) < threshold`` before choosing a strategy.
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    A non-negative integer.
+    """
+    return min(operator.out_size(), operator.in_size())
+
+
+@max_rank.register(MatrixLinearOperator)
+@max_rank.register(PyTreeLinearOperator)
+@max_rank.register(JacobianLinearOperator)
+@max_rank.register(FunctionLinearOperator)
+def _(operator):
+    return _max_rank_from_tags(operator.tags, min(operator.out_size(), operator.in_size()))
+
+
+@max_rank.register(TaggedLinearOperator)
+def _(operator):
+    return _max_rank_from_tags(operator.tags, max_rank(operator.operator))
+
+
+# Identity, Diagonal, TridiagonalLinearOperator fall through to the default dispatch:
+# they are full-rank by construction, so min(out_size, in_size) is exact.
+
+
+@max_rank.register(ComposedLinearOperator)
+def _(operator):
+    return min(max_rank(operator.operator1), max_rank(operator.operator2))
+
+
+@max_rank.register(AddLinearOperator)
+def _(operator):
+    return min(
+        max_rank(operator.operator1) + max_rank(operator.operator2),
+        min(operator.out_size(), operator.in_size()),
+    )
+
+
+@max_rank.register(MulLinearOperator)
+def _(operator):
+    if _scalar_sign(operator.scalar) is _ScalarSign.zero:
+        return 0
+    return max_rank(operator.operator)
+
+
+@max_rank.register(NegLinearOperator)
+@max_rank.register(DivLinearOperator)
+def _(operator):
+    return max_rank(operator.operator)
+
+
+@max_rank.register(TangentLinearOperator)
+def _(operator):
+    return max_rank(operator.primal)

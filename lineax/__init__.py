@@ -37,6 +37,7 @@ from ._operator import (
     linearise as linearise,
     materialise as materialise,
     MatrixLinearOperator as MatrixLinearOperator,
+    max_rank as max_rank,
     MulLinearOperator as MulLinearOperator,
     NegLinearOperator as NegLinearOperator,
     PyTreeLinearOperator as PyTreeLinearOperator,
@@ -69,6 +70,7 @@ from ._solver import (
 )
 from ._tags import (
     diagonal_tag as diagonal_tag,
+    MaxRankTag as MaxRankTag,
     invert_tags as invert_tags,
     invert_tags_rules as invert_tags_rules,
     lower_triangular_tag as lower_triangular_tag,

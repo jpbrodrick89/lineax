@@ -12,11 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
     from ._operator import AbstractLinearOperator
+
+
+@dataclasses.dataclass(frozen=True)
+class MaxRankTag:
+    """A tag declaring that a linear operator has rank at most ``value``.
+
+    Unlike the boolean presence/absence tags (e.g. :data:`symmetric_tag`),
+    ``MaxRankTag`` carries an integer payload.  It is stored in the same
+    ``frozenset[object]`` tag field, relying on the frozen-dataclass
+    ``__hash__`` / ``__eq__`` so that ``MaxRankTag(5) == MaxRankTag(5)``
+    (idempotent in a frozenset) while ``MaxRankTag(5) != MaxRankTag(3)``.
+
+    ``value = 0`` is valid and represents the zero operator.
+
+    **Arguments:**
+
+    - ``value``: non-negative integer upper bound on the rank.
+    """
+
+    value: int
+
+    def __post_init__(self):
+        if not isinstance(self.value, int) or self.value < 0:
+            raise ValueError(
+                f"MaxRankTag.value must be a non-negative integer, got {self.value!r}"
+            )
+
+    def __repr__(self):
+        return f"max_rank_tag({self.value})"
 
 
 class _HasRepr:
@@ -112,6 +142,13 @@ def _(tags: frozenset[object]):
 def _(tags: frozenset[object]):
     if upper_triangular_tag in tags:
         return lower_triangular_tag
+
+
+@transpose_tags_rules.append
+def _(tags: frozenset[object]):
+    rank_tags = [t for t in tags if isinstance(t, MaxRankTag)]
+    if rank_tags:
+        return min(rank_tags, key=lambda t: t.value)
 
 
 def transpose_tags(tags: frozenset[object]):
