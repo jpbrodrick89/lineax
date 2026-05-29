@@ -53,3 +53,9 @@ Note that these do *not* inspect the values of the operator -- instead, they use
 ---
 
 ::: lineax.is_symmetric
+
+## Query the rank of an operator
+
+Unlike the boolean `is_*` functions above, `max_rank` returns an integer upper bound on the rank. It always returns a value — operators with no declared bound return `min(out_size, in_size)`. See [`lineax.MaxRankTag`][] for how to declare a bound.
+
+::: lineax.max_rank

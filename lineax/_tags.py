@@ -96,9 +96,10 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
         is_symmetric,
         is_tridiagonal,
         is_upper_triangular,
+        max_rank,
     )
 
-    return frozenset(
+    tags: set[object] = {
         tag
         for check, tag in [
             (is_symmetric, symmetric_tag),
@@ -111,7 +112,12 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
             (is_tridiagonal, tridiagonal_tag),
         ]
         if check(operator)
-    )
+    }
+    dim_bound = min(operator.in_size(), operator.out_size())
+    mr = max_rank(operator)
+    if mr < dim_bound:
+        tags.add(MaxRankTag(mr))
+    return frozenset(tags)
 
 
 transpose_tags_rules = []

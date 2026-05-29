@@ -64,6 +64,34 @@ lx.is_symmetric(lx.DiagonalLinearOperator(...))  # True
 lx.is_positive_semidefinite(lx.IdentityLinearOperator(...))  # True
 ```
 
+## Valued tags
+
+Most tags are simple markers — their presence or absence in the `frozenset` is all that matters. `MaxRankTag` is different: it carries an integer payload declaring an upper bound on the operator's rank.
+
+::: lineax.MaxRankTag
+
+Use [`lineax.max_rank`][] to query the bound:
+
+```python
+k, n = 5, 100
+U  = lx.MatrixLinearOperator(jnp.zeros((n, k)), lx.MaxRankTag(k))
+C  = lx.MatrixLinearOperator(jnp.zeros((k, k)), lx.MaxRankTag(k))
+Vt = lx.MatrixLinearOperator(jnp.zeros((k, n)), lx.MaxRankTag(k))
+
+update = U @ C @ Vt
+assert lx.max_rank(update) == k   # propagated automatically through composition
+```
+
+`MaxRankTag` is preserved through transposition and inversion (rank is invariant under both). It composes through `@` as `min(rank_A, rank_B)` and through `+` as `min(rank_A + rank_B, dim)`.
+
+!!! Warning
+
+    As with all other tags, the declared rank is not verified against the actual matrix values. Misuse will cause solvers to silently return wrong results.
+
+    Declaring a rank-deficient operator and then solving with a full-rank solver
+    (e.g. the default `AutoLinearSolver(well_posed=True)`) raises a `ValueError` at
+    solve time rather than returning a silent wrong answer.
+
 ## List of available tags
 
 ::: lineax.symmetric_tag

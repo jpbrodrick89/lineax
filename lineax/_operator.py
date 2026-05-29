@@ -2412,11 +2412,6 @@ def _(operator):
 # max_rank
 
 
-def _max_rank_from_tags(tags: frozenset[object], fallback: int) -> int:
-    bounds = [t.value for t in tags if isinstance(t, MaxRankTag)]
-    return min(min(bounds), fallback) if bounds else fallback
-
-
 @ft.singledispatch
 def max_rank(operator: AbstractLinearOperator) -> int:
     """Returns the maximum possible rank of the linear operator.
@@ -2431,6 +2426,11 @@ def max_rank(operator: AbstractLinearOperator) -> int:
     linear operator, so third-party subclasses that do not register a
     dispatch still produce a valid result.
 
+    If the operator has a ``.tags`` attribute, any :class:`MaxRankTag` values
+    found there are automatically respected — so third-party operators that
+    follow the lineax tagging convention get rank propagation for free without
+    registering a custom dispatch.
+
     The return value is a plain Python ``int`` (never a JAX tracer), suitable
     for use in solver-dispatch control flow, e.g. a future Woodbury solver
     that checks ``max_rank(operator) < threshold`` before choosing a strategy.
@@ -2443,20 +2443,19 @@ def max_rank(operator: AbstractLinearOperator) -> int:
 
     A non-negative integer.
     """
-    return min(operator.out_size(), operator.in_size())
-
-
-@max_rank.register(MatrixLinearOperator)
-@max_rank.register(PyTreeLinearOperator)
-@max_rank.register(JacobianLinearOperator)
-@max_rank.register(FunctionLinearOperator)
-def _(operator):
-    return _max_rank_from_tags(operator.tags, min(operator.out_size(), operator.in_size()))
+    dim_bound = min(operator.out_size(), operator.in_size())
+    if hasattr(operator, "tags"):
+        bounds = [t.value for t in operator.tags if isinstance(t, MaxRankTag)]
+        if bounds:
+            return min(min(bounds), dim_bound)
+    return dim_bound
 
 
 @max_rank.register(TaggedLinearOperator)
 def _(operator):
-    return _max_rank_from_tags(operator.tags, max_rank(operator.operator))
+    inner = max_rank(operator.operator)
+    bounds = [t.value for t in operator.tags if isinstance(t, MaxRankTag)]
+    return min(min(bounds), inner) if bounds else inner
 
 
 # Identity, Diagonal, TridiagonalLinearOperator fall through to the default dispatch:
