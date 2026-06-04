@@ -117,3 +117,9 @@ For example, the default solver for [`lineax.linear_solve`][] uses this to dispa
 Marks that an operator is negative **semidefinite**.
 
 For example, the default solver for [`lineax.linear_solve`][] uses this to dispatch to [`lineax.Cholesky`][] as the solver.
+
+---
+
+::: lineax.MaxRankTag
+    options:
+      members: false
