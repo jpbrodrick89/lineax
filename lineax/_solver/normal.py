@@ -15,7 +15,6 @@
 from copy import copy
 from typing import Any, TypeVar
 
-import equinox as eqx
 import equinox.internal as eqxi
 from jaxtyping import Array, PyTree
 
@@ -102,28 +101,12 @@ class Normal(
 
     inner_solver: AbstractLinearSolver[_InnerSolverState]
 
-    def __new__(cls, inner_solver: AbstractLinearSolver):
-        if cls is Normal and isinstance(inner_solver, AbstractDirectLinearSolver):
-            # Manually construct _NormalDirect to avoid Python calling Normal.__init__
-            # on an already-initialized instance (which would conflict with equinox's
-            # _currently_initialising mechanism).
-            nd = eqx.Module.__new__(_NormalDirect)
-            object.__setattr__(nd, "inner_solver", inner_solver)
-            return nd
-        return eqx.Module.__new__(cls)
-
-    def __init__(self, inner_solver: AbstractLinearSolver):
-        if isinstance(self, _NormalDirect):
-            return  # Initialized in __new__ via object.__setattr__
-        self.inner_solver = inner_solver
-
     def init(self, operator, options):
         tall = operator.out_size() >= operator.in_size()
         # Direct solvers materialise the operator; materialise first to avoid
         # computing (op^H @ op).as_matrix() twice via the two branches.
         # For iterative solvers we only linearise to avoid eager materialisation.
-        is_direct = isinstance(self.inner_solver, AbstractDirectLinearSolver)
-        lin_op = materialise(operator) if is_direct else linearise(operator)
+        lin_op = materialise(operator) if is_direct(self.inner_solver) else linearise(operator)
         if tall:
             inner_operator = conj(lin_op.transpose()) @ lin_op
         else:
@@ -195,6 +178,37 @@ class Normal(
     def assume_full_rank(self):
         return self.inner_solver.assume_full_rank()
 
+    def logabsdet(
+        self,
+        state: tuple[
+            _InnerSolverState, eqxi.Static, AbstractLinearOperator, dict[str, Any]
+        ],
+        options: dict[str, Any],
+    ) -> Array:
+        if not is_direct(self.inner_solver):
+            raise TypeError(
+                f"`Normal.logabsdet` requires a direct inner solver, "
+                f"got {type(self.inner_solver).__name__}. "
+                f"Use a direct solver such as `lx.Cholesky()` or `lx.LU()`."
+            )
+        inner_state, _, _, inner_options = state
+        # log|det(A^H A)| = 2 * log|det(A)| for tall A (m >= n)
+        # log|det(A A^H)| = 2 * log|det(A)| for wide A (m < n)
+        # so log|det(A)| = 0.5 * log|det(normal_operator)|
+        return 0.5 * self.inner_solver.logabsdet(inner_state, inner_options)
+
+    def det_sign(
+        self,
+        state: tuple[
+            _InnerSolverState, eqxi.Static, AbstractLinearOperator, dict[str, Any]
+        ],
+        options: dict[str, Any],
+    ) -> Array:
+        raise NotImplementedError(
+            "`Normal` cannot recover `det_sign`: squaring the operator destroys "
+            "sign information. Use `lx.LU()` to compute the sign of the determinant."
+        )
+
 
 Normal.__init__.__doc__ = """**Arguments:**
 
@@ -203,22 +217,16 @@ Normal.__init__.__doc__ = """**Arguments:**
 """
 
 
-class _NormalDirect(Normal, AbstractDirectLinearSolver):
-    """Returned by `Normal(inner_solver)` when `inner_solver` is a direct solver.
+def is_direct(solver: AbstractLinearSolver) -> bool:
+    """Returns `True` if `solver` is a direct solver that supports `logabsdet`.
 
-    Inherits all solve logic from `Normal` and additionally exposes `logabsdet`.
-    `det_sign` is not supported because squaring the operator destroys sign information.
+    Direct solvers (e.g. [`lineax.LU`][], [`lineax.Cholesky`][],
+    [`lineax.SVD`][], [`lineax.Triangular`][], [`lineax.Diagonal`][],
+    [`lineax.Tridiagonal`][]) materialise the operator and can compute
+    determinants from their factored state.
+
+    [`lineax.Normal`][] with a direct inner solver also satisfies this check.
     """
-
-    def logabsdet(self, state, options):
-        inner_state, _, _, inner_options = state
-        # log|det(A^H A)| = 2 * log|det(A)| for tall A (m >= n)
-        # log|det(A A^H)| = 2 * log|det(A)| for wide A (m < n)
-        # so log|det(A)| = 0.5 * log|det(normal_operator)|
-        return 0.5 * self.inner_solver.logabsdet(inner_state, inner_options)
-
-    def det_sign(self, state, options):
-        raise NotImplementedError(
-            "`Normal` cannot recover `det_sign`: squaring the operator destroys "
-            "sign information. Use `LU` to compute the sign of the determinant."
-        )
+    if isinstance(solver, Normal):
+        return isinstance(solver.inner_solver, AbstractDirectLinearSolver)
+    return isinstance(solver, AbstractDirectLinearSolver)
