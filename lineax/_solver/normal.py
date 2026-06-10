@@ -228,5 +228,5 @@ def is_direct(solver: AbstractLinearSolver) -> bool:
     [`lineax.Normal`][] with a direct inner solver also satisfies this check.
     """
     if isinstance(solver, Normal):
-        return isinstance(solver.inner_solver, AbstractDirectLinearSolver)
+        return is_direct(solver.inner_solver)
     return isinstance(solver, AbstractDirectLinearSolver)
