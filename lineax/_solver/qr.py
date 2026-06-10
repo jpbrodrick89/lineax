@@ -21,7 +21,7 @@ import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -34,7 +34,7 @@ from .misc import (
 _QRState: TypeAlias = tuple[tuple[Array, Array], eqxi.Static, PackedStructures]
 
 
-class QR(AbstractLinearSolver):
+class QR(AbstractDirectLinearSolver):
     """QR solver for linear systems.
 
     This solver can handle non-square operators.
@@ -113,6 +113,18 @@ class QR(AbstractLinearSolver):
         )
         conj_options = {}
         return conj_state, conj_options
+
+    def logabsdet(self, state: _QRState, options: dict[str, Any]) -> Array:
+        raise NotImplementedError(
+            "`QR` does not support `logabsdet`: `geqrf` has no JAX AD rules. "
+            "Use `LU` or `SVD` instead."
+        )
+
+    def det_sign(self, state: _QRState, options: dict[str, Any]) -> Array:
+        raise NotImplementedError(
+            "`QR` does not support `det_sign`: `geqrf` has no JAX AD rules. "
+            "Use `LU` instead."
+        )
 
     def assume_full_rank(self):
         return True

@@ -16,6 +16,7 @@ from typing import Any, TypeAlias
 
 import equinox.internal as eqxi
 import jax.flatten_util as jfu
+import jax.numpy as jnp
 import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
@@ -25,13 +26,13 @@ from .._operator import (
     is_positive_semidefinite,
 )
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 
 
 _CholeskyState: TypeAlias = tuple[Array, eqxi.Static]
 
 
-class Cholesky(AbstractLinearSolver[_CholeskyState]):
+class Cholesky(AbstractDirectLinearSolver[_CholeskyState]):
     """Cholesky solver for linear systems. This is generally the preferred solver for
     positive or negative definite systems.
 
@@ -90,6 +91,18 @@ class Cholesky(AbstractLinearSolver[_CholeskyState]):
         # Matrix is self-adjoint
         factor, is_nsd = state
         return (factor.conj(), is_nsd), options
+
+    def logabsdet(self, state: _CholeskyState, options: dict[str, Any]) -> Array:
+        del options
+        factor, _ = state
+        return 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(factor))))
+
+    def det_sign(self, state: _CholeskyState, options: dict[str, Any]) -> Array:
+        del options
+        factor, is_nsd = state
+        n = factor.shape[0]
+        sign = -1 if (is_nsd.value and n % 2 == 1) else 1
+        return jnp.array(sign, dtype=jnp.result_type(factor.real.dtype, jnp.float32))
 
     def assume_full_rank(self):
         return True

@@ -15,6 +15,7 @@
 from typing import Any, TypeAlias
 
 import equinox.internal as eqxi
+import jax.numpy as jnp
 import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
@@ -25,7 +26,7 @@ from .._operator import (
     is_upper_triangular,
 )
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -40,7 +41,7 @@ _TriangularState: TypeAlias = tuple[
 ]
 
 
-class Triangular(AbstractLinearSolver[_TriangularState]):
+class Triangular(AbstractDirectLinearSolver[_TriangularState]):
     """Triangular solver for linear systems.
 
     The operator should either be lower triangular or upper triangular.
@@ -110,6 +111,20 @@ class Triangular(AbstractLinearSolver[_TriangularState]):
         )
         conj_options = {}
         return conj_state, conj_options
+
+    def logabsdet(self, state: _TriangularState, options: dict[str, Any]) -> Array:
+        del options
+        matrix, _, unit_diagonal, _, _ = state
+        if unit_diagonal.value:
+            return jnp.zeros((), dtype=matrix.real.dtype)
+        return jnp.sum(jnp.log(jnp.abs(jnp.diag(matrix))))
+
+    def det_sign(self, state: _TriangularState, options: dict[str, Any]) -> Array:
+        del options
+        matrix, _, unit_diagonal, _, _ = state
+        if unit_diagonal.value:
+            return jnp.ones((), dtype=matrix.real.dtype)
+        return jnp.prod(jnp.sign(jnp.diag(matrix))).real
 
     def assume_full_rank(self):
         return True

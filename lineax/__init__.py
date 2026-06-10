@@ -47,10 +47,14 @@ from ._operator import (
 )
 from ._solution import RESULTS as RESULTS, Solution as Solution
 from ._solve import (
+    AbstractDirectLinearSolver as AbstractDirectLinearSolver,
     AbstractLinearSolver as AbstractLinearSolver,
     AutoLinearSolver as AutoLinearSolver,
+    determinant as determinant,
     invert as invert,
     linear_solve as linear_solve,
+    logabsdet as logabsdet,
+    slogdet as slogdet,
 )
 from ._solver import (
     BiCGStab as BiCGStab,

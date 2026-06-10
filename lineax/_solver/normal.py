@@ -15,14 +15,14 @@
 from copy import copy
 from typing import Any, TypeVar
 
+import equinox as eqx
 import equinox.internal as eqxi
 from jaxtyping import Array, PyTree
 
 from .._operator import conj, linearise, materialise, TaggedLinearOperator
 from .._solution import RESULTS
-from .._solve import AbstractLinearOperator, AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver, AbstractLinearOperator, AbstractLinearSolver
 from .._tags import positive_semidefinite_tag
-from .cholesky import Cholesky
 
 
 _InnerSolverState = TypeVar("_InnerSolverState")
@@ -102,13 +102,28 @@ class Normal(
 
     inner_solver: AbstractLinearSolver[_InnerSolverState]
 
+    def __new__(cls, inner_solver: AbstractLinearSolver):
+        if cls is Normal and isinstance(inner_solver, AbstractDirectLinearSolver):
+            # Manually construct _NormalDirect to avoid Python calling Normal.__init__
+            # on an already-initialized instance (which would conflict with equinox's
+            # _currently_initialising mechanism).
+            nd = eqx.Module.__new__(_NormalDirect)
+            object.__setattr__(nd, "inner_solver", inner_solver)
+            return nd
+        return eqx.Module.__new__(cls)
+
+    def __init__(self, inner_solver: AbstractLinearSolver):
+        if isinstance(self, _NormalDirect):
+            return  # Initialized in __new__ via object.__setattr__
+        self.inner_solver = inner_solver
+
     def init(self, operator, options):
         tall = operator.out_size() >= operator.in_size()
-        # Cholesky materialises op twice when computing (op^H @ op).as_matrix()
-        # Cheaper to materialise first and then conjugate-transpose.
+        # Direct solvers materialise the operator; materialise first to avoid
+        # computing (op^H @ op).as_matrix() twice via the two branches.
         # For iterative solvers we only linearise to avoid eager materialisation.
-        is_cholesky = isinstance(self.inner_solver, Cholesky)
-        lin_op = materialise(operator) if is_cholesky else linearise(operator)
+        is_direct = isinstance(self.inner_solver, AbstractDirectLinearSolver)
+        lin_op = materialise(operator) if is_direct else linearise(operator)
         if tall:
             inner_operator = conj(lin_op.transpose()) @ lin_op
         else:
@@ -186,3 +201,24 @@ Normal.__init__.__doc__ = """**Arguments:**
 - `inner_solver`: The solver to wrap. It should support solving positive
   definite systems or positive semidefinite systems
 """
+
+
+class _NormalDirect(Normal, AbstractDirectLinearSolver):
+    """Returned by `Normal(inner_solver)` when `inner_solver` is a direct solver.
+
+    Inherits all solve logic from `Normal` and additionally exposes `logabsdet`.
+    `det_sign` is not supported because squaring the operator destroys sign information.
+    """
+
+    def logabsdet(self, state, options):
+        inner_state, _, _, inner_options = state
+        # log|det(A^H A)| = 2 * log|det(A)| for tall A (m >= n)
+        # log|det(A A^H)| = 2 * log|det(A)| for wide A (m < n)
+        # so log|det(A)| = 0.5 * log|det(normal_operator)|
+        return 0.5 * self.inner_solver.logabsdet(inner_state, inner_options)
+
+    def det_sign(self, state, options):
+        raise NotImplementedError(
+            "`Normal` cannot recover `det_sign`: squaring the operator destroys "
+            "sign information. Use `LU` to compute the sign of the determinant."
+        )

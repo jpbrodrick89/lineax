@@ -20,7 +20,7 @@ from jaxtyping import Array, PyTree
 
 from .._operator import AbstractLinearOperator, is_tridiagonal, tridiagonal
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -33,7 +33,7 @@ from .misc import (
 _TridiagonalState: TypeAlias = tuple[tuple[Array, Array, Array], PackedStructures]
 
 
-class Tridiagonal(AbstractLinearSolver[_TridiagonalState]):
+class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
     """Tridiagonal solver for linear systems, uses the LAPACK/cusparse implementation
     of Gaussian elimination with partial pivotting (which increases stability).
     ."""
@@ -83,6 +83,34 @@ class Tridiagonal(AbstractLinearSolver[_TridiagonalState]):
         conj_diagonals = (diagonal.conj(), lower_diagonal.conj(), upper_diagonal.conj())
         conj_state = (conj_diagonals, packed_structures)
         return conj_state, options
+
+    def logabsdet(self, state: _TridiagonalState, options: dict[str, Any]) -> Array:
+        del options
+        (diagonal, lower_diagonal, upper_diagonal), _ = state
+        n = diagonal.shape[0]
+
+        def step(pivot_prev, i):
+            pivot = diagonal[i] - lower_diagonal[i - 1] * upper_diagonal[i - 1] / pivot_prev
+            return pivot, pivot
+
+        pivot0 = diagonal[0]
+        _, pivots_rest = lax.scan(step, pivot0, jnp.arange(1, n))
+        pivots = jnp.concatenate([pivot0[None], pivots_rest])
+        return jnp.sum(jnp.log(jnp.abs(pivots)))
+
+    def det_sign(self, state: _TridiagonalState, options: dict[str, Any]) -> Array:
+        del options
+        (diagonal, lower_diagonal, upper_diagonal), _ = state
+        n = diagonal.shape[0]
+
+        def step(pivot_prev, i):
+            pivot = diagonal[i] - lower_diagonal[i - 1] * upper_diagonal[i - 1] / pivot_prev
+            return pivot, pivot
+
+        pivot0 = diagonal[0]
+        _, pivots_rest = lax.scan(step, pivot0, jnp.arange(1, n))
+        pivots = jnp.concatenate([pivot0[None], pivots_rest])
+        return jnp.prod(jnp.sign(pivots)).real
 
     def assume_full_rank(self):
         return True

@@ -22,7 +22,7 @@ from jaxtyping import Array, PyTree
 from .._misc import resolve_rcond
 from .._operator import AbstractLinearOperator
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -35,7 +35,7 @@ from .misc import (
 _SVDState: TypeAlias = tuple[tuple[Array, Array, Array], PackedStructures]
 
 
-class SVD(AbstractLinearSolver[_SVDState]):
+class SVD(AbstractDirectLinearSolver[_SVDState]):
     """SVD solver for linear systems.
 
     This solver can handle any operator, even nonsquare or singular ones. In these
@@ -91,6 +91,23 @@ class SVD(AbstractLinearSolver[_SVDState]):
         conj_state = (u.conj(), s, vt.conj()), packed_structures
         conj_options = {}
         return conj_state, conj_options
+
+    def logabsdet(self, state: _SVDState, options: dict[str, Any]) -> Array:
+        del options
+        (u, s, vt), _ = state
+        m, _ = u.shape
+        _, n = vt.shape
+        if m != n:
+            raise ValueError(
+                "`SVD.logabsdet` is only defined for square operators"
+            )
+        return jnp.sum(jnp.log(s))
+
+    def det_sign(self, state: _SVDState, options: dict[str, Any]) -> Array:
+        raise NotImplementedError(
+            "`SVD` does not support `det_sign`: computing sign(det(U)) and "
+            "sign(det(V^T)) requires O(n³) additional work. Use `LU` instead."
+        )
 
     def assume_full_rank(self):
         return False

@@ -21,7 +21,7 @@ from jaxtyping import Array, PyTree
 
 from .._operator import AbstractLinearOperator, is_diagonal
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .._solve import AbstractDirectLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,
@@ -34,7 +34,7 @@ from .misc import (
 _LUState: TypeAlias = tuple[tuple[Array, Array], PackedStructures, eqxi.Static]
 
 
-class LU(AbstractLinearSolver[_LUState]):
+class LU(AbstractDirectLinearSolver[_LUState]):
     """LU solver for linear systems.
 
     This solver can only handle square nonsingular operators.
@@ -93,6 +93,20 @@ class LU(AbstractLinearSolver[_LUState]):
         )
         conj_options = {}
         return conj_state, conj_options
+
+    def logabsdet(self, state: _LUState, options: dict[str, Any]) -> Array:
+        del options
+        (lu, piv), _, _ = state
+        return jnp.sum(jnp.log(jnp.abs(jnp.diag(lu))))
+
+    def det_sign(self, state: _LUState, options: dict[str, Any]) -> Array:
+        del options
+        (lu, piv), _, _ = state
+        n = lu.shape[0]
+        num_swaps = jnp.sum(piv != jnp.arange(n, dtype=piv.dtype))
+        perm_sign = jnp.where(num_swaps % 2 == 0, 1, -1)
+        diag_sign = jnp.prod(jnp.sign(jnp.diag(lu)))
+        return (perm_sign * diag_sign).astype(lu.real.dtype)
 
     def assume_full_rank(self):
         return True
