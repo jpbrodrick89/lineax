@@ -522,17 +522,35 @@ class AbstractDirectLinearSolver(AbstractLinearSolver[_SolverState]):
         """
 
 
-class SupportsLogdet(Protocol):
-    """Structural type for solvers that can compute log-determinants.
+class MaybeDirectLinearSolver(Protocol):
+    """Structural type for direct linear solvers.
 
-    Satisfied by any [`lineax.AbstractDirectLinearSolver`][] and by
-    [`lineax.Normal`][] when its `inner_solver` is a direct solver.
+    Duck-typed equivalent of [`lineax.AbstractDirectLinearSolver`][].
+    Satisfied by any `AbstractDirectLinearSolver` subclass and by
+    [`lineax.Normal`][] when its `inner_solver` is direct.
     Use [`lineax.is_direct`][] to check at runtime.
+
+    Note: cannot inherit from `AbstractLinearSolver` due to equinox metaclass
+    constraints, so all methods are listed explicitly.
     """
 
     def init(
         self, operator: AbstractLinearOperator, options: dict[str, Any]
     ) -> Any: ...
+
+    def compute(
+        self, state: Any, vector: "PyTree[Array]", options: dict[str, Any]
+    ) -> "tuple[PyTree[Array], RESULTS, dict[str, Any]]": ...
+
+    def transpose(
+        self, state: Any, options: dict[str, Any]
+    ) -> "tuple[Any, dict[str, Any]]": ...
+
+    def conj(
+        self, state: Any, options: dict[str, Any]
+    ) -> "tuple[Any, dict[str, Any]]": ...
+
+    def assume_full_rank(self) -> bool: ...
 
     def logabsdet(self, state: Any, options: dict[str, Any]) -> "Array": ...
 
@@ -541,7 +559,7 @@ class SupportsLogdet(Protocol):
 
 def slogdet(
     operator: AbstractLinearOperator,
-    solver: SupportsLogdet,
+    solver: MaybeDirectLinearSolver,
     *,
     options: dict[str, Any] | None = None,
 ) -> tuple[Array, Array]:
@@ -567,7 +585,7 @@ def slogdet(
 
 def logabsdet(
     operator: AbstractLinearOperator,
-    solver: SupportsLogdet,
+    solver: MaybeDirectLinearSolver,
     *,
     options: dict[str, Any] | None = None,
 ) -> Array:
@@ -591,7 +609,7 @@ def logabsdet(
 
 def determinant(
     operator: AbstractLinearOperator,
-    solver: SupportsLogdet,
+    solver: MaybeDirectLinearSolver,
     *,
     options: dict[str, Any] | None = None,
 ) -> Array:
