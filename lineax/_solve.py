@@ -14,7 +14,7 @@
 
 import abc
 import functools as ft
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -522,9 +522,26 @@ class AbstractDirectLinearSolver(AbstractLinearSolver[_SolverState]):
         """
 
 
+class SupportsLogdet(Protocol):
+    """Structural type for solvers that can compute log-determinants.
+
+    Satisfied by any [`lineax.AbstractDirectLinearSolver`][] and by
+    [`lineax.Normal`][] when its `inner_solver` is a direct solver.
+    Use [`lineax.is_direct`][] to check at runtime.
+    """
+
+    def init(
+        self, operator: AbstractLinearOperator, options: dict[str, Any]
+    ) -> Any: ...
+
+    def logabsdet(self, state: Any, options: dict[str, Any]) -> "Array": ...
+
+    def det_sign(self, state: Any, options: dict[str, Any]) -> "Array": ...
+
+
 def slogdet(
     operator: AbstractLinearOperator,
-    solver: "AbstractDirectLinearSolver",
+    solver: SupportsLogdet,
     *,
     options: dict[str, Any] | None = None,
 ) -> tuple[Array, Array]:
@@ -550,7 +567,7 @@ def slogdet(
 
 def logabsdet(
     operator: AbstractLinearOperator,
-    solver: "AbstractDirectLinearSolver",
+    solver: SupportsLogdet,
     *,
     options: dict[str, Any] | None = None,
 ) -> Array:
@@ -574,7 +591,7 @@ def logabsdet(
 
 def determinant(
     operator: AbstractLinearOperator,
-    solver: "AbstractDirectLinearSolver",
+    solver: SupportsLogdet,
     *,
     options: dict[str, Any] | None = None,
 ) -> Array:

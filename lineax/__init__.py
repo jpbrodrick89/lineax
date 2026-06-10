@@ -55,6 +55,7 @@ from ._solve import (
     linear_solve as linear_solve,
     logabsdet as logabsdet,
     slogdet as slogdet,
+    SupportsLogdet as SupportsLogdet,
 )
 from ._solver import (
     BiCGStab as BiCGStab,
