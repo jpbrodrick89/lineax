@@ -14,7 +14,7 @@
 
 import abc
 import functools as ft
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -520,117 +520,6 @@ class AbstractDirectLinearSolver(AbstractLinearSolver[_SolverState]):
         A scalar array equal to the sign of the determinant (+1, -1, or 0 for real
         operators; a unit complex number for complex operators).
         """
-
-
-class MaybeDirectLinearSolver(Protocol):
-    """Structural type for direct linear solvers.
-
-    Duck-typed equivalent of [`lineax.AbstractDirectLinearSolver`][].
-    Satisfied by any `AbstractDirectLinearSolver` subclass and by
-    [`lineax.Normal`][] when its `inner_solver` is direct.
-    Use [`lineax.is_direct`][] to check at runtime.
-
-    Note: cannot inherit from `AbstractLinearSolver` due to equinox metaclass
-    constraints, so all methods are listed explicitly.
-    """
-
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> Any: ...
-
-    def compute(
-        self, state: Any, vector: "PyTree[Array]", options: dict[str, Any]
-    ) -> "tuple[PyTree[Array], RESULTS, dict[str, Any]]": ...
-
-    def transpose(
-        self, state: Any, options: dict[str, Any]
-    ) -> "tuple[Any, dict[str, Any]]": ...
-
-    def conj(
-        self, state: Any, options: dict[str, Any]
-    ) -> "tuple[Any, dict[str, Any]]": ...
-
-    def assume_full_rank(self) -> bool: ...
-
-    def logabsdet(self, state: Any, options: dict[str, Any]) -> "Array": ...
-
-    def det_sign(self, state: Any, options: dict[str, Any]) -> "Array": ...
-
-
-def slogdet(
-    operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
-    *,
-    options: dict[str, Any] | None = None,
-) -> tuple[Array, Array]:
-    """Compute `(sign, log|det(operator)|)` using the given direct solver.
-
-    Follows the same convention as `numpy.linalg.slogdet`.
-
-    **Arguments:**
-
-    - `operator`: a linear operator.
-    - `solver`: a direct linear solver.
-    - `options`: any extra options to pass to the solver.
-
-    **Returns:**
-
-    A 2-tuple of `(sign, logabsdet)`.
-    """
-    if options is None:
-        options = {}
-    state = solver.init(operator, options)
-    return solver.det_sign(state, options), solver.logabsdet(state, options)
-
-
-def logabsdet(
-    operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
-    *,
-    options: dict[str, Any] | None = None,
-) -> Array:
-    """Compute log|det(operator)| using the given direct solver.
-
-    **Arguments:**
-
-    - `operator`: a linear operator.
-    - `solver`: a direct linear solver.
-    - `options`: any extra options to pass to the solver.
-
-    **Returns:**
-
-    A scalar array equal to the log of the absolute value of the determinant.
-    """
-    if options is None:
-        options = {}
-    state = solver.init(operator, options)
-    return solver.logabsdet(state, options)
-
-
-def determinant(
-    operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
-    *,
-    options: dict[str, Any] | None = None,
-) -> Array:
-    """Compute det(operator) using the given direct solver.
-
-    **Arguments:**
-
-    - `operator`: a linear operator.
-    - `solver`: a direct linear solver.
-    - `options`: any extra options to pass to the solver.
-
-    **Returns:**
-
-    A scalar array equal to the determinant.
-    """
-    if options is None:
-        options = {}
-    state = solver.init(operator, options)
-    sign = solver.det_sign(state, options)
-    logabs = solver.logabsdet(state, options)
-    return sign * jnp.exp(logabs)
 
 
 _qr_token = eqxi.str2jax("qr_token")

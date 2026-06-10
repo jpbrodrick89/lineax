@@ -46,16 +46,18 @@ from ._operator import (
     TridiagonalLinearOperator as TridiagonalLinearOperator,
 )
 from ._solution import RESULTS as RESULTS, Solution as Solution
+from ._determinant import (
+    determinant as determinant,
+    logabsdet as logabsdet,
+    MaybeDirectLinearSolver as MaybeDirectLinearSolver,
+    slogdet as slogdet,
+)
 from ._solve import (
     AbstractDirectLinearSolver as AbstractDirectLinearSolver,
     AbstractLinearSolver as AbstractLinearSolver,
     AutoLinearSolver as AutoLinearSolver,
-    determinant as determinant,
     invert as invert,
     linear_solve as linear_solve,
-    logabsdet as logabsdet,
-    slogdet as slogdet,
-    MaybeDirectLinearSolver as MaybeDirectLinearSolver,
 )
 from ._solver import (
     BiCGStab as BiCGStab,
