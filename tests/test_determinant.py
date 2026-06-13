@@ -64,16 +64,17 @@ def test_slogdet_square(solver, tags, getkey):
 
 
 # ----------------------------------------------------------------------------
-# Normal(Cholesky): sign=nan, lad matches jnp.linalg.slogdet
+# Normal(Cholesky): sign=nan, lad = sum(log(singular values)) for rectangular A
 # ----------------------------------------------------------------------------
 
-def test_normal_cholesky_slogdet(getkey):
-    (matrix,) = construct_matrix(getkey, lx.Normal(lx.Cholesky()), lx.positive_semidefinite_tag)
-    op = _make_op(matrix, lx.positive_semidefinite_tag)
+@pytest.mark.parametrize("shape", [(5, 3), (3, 5)])
+def test_normal_cholesky_slogdet_rectangular(shape, getkey):
+    A = jr.normal(getkey(), shape, dtype=jnp.float64)
+    op = lx.MatrixLinearOperator(A)
     sign, lad = lx.slogdet(op, lx.Normal(lx.Cholesky()))
     assert jnp.isnan(sign)
-    _, ref_lad = jnp.linalg.slogdet(matrix)
-    assert jnp.allclose(lad, ref_lad, atol=1e-8)
+    s = jnp.linalg.svd(A, compute_uv=False)
+    assert jnp.allclose(lad, jnp.sum(jnp.log(s)), atol=1e-8)
 
 
 # ----------------------------------------------------------------------------
