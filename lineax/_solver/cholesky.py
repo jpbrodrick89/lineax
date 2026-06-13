@@ -18,7 +18,6 @@ import equinox.internal as eqxi
 import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.scipy as jsp
-import numpy as np
 from jaxtyping import Array, PyTree
 
 from .._operator import (
@@ -98,7 +97,7 @@ class Cholesky(AbstractDirectLinearSolver[_CholeskyState]):
         factor, is_nsd = state
         n = factor.shape[0]
         sign_val = -1 if (is_nsd.value and n % 2 == 1) else 1
-        sign = jnp.array(sign_val, dtype=np.result_type(factor.real.dtype, np.float32))
+        sign = jnp.array(sign_val, dtype=factor.real.dtype)
         lad = 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(factor))))
         return sign, lad
 

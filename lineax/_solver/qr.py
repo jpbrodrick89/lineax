@@ -18,7 +18,6 @@ import equinox.internal as eqxi
 import jax.lax.linalg as jll
 import jax.numpy as jnp
 import jax.scipy as jsp
-import numpy as np
 from jaxtyping import Array, PyTree
 
 from .._solution import RESULTS
@@ -120,7 +119,6 @@ class QR(AbstractDirectLinearSolver):
         (a, taus), transpose, _ = state
         # diag(a) = diag(h.mT) = diag(h) = diag(R) for both tall and wide inputs
         lad = jnp.sum(jnp.log(jnp.abs(jnp.diag(a))))
-        float_dtype = np.result_type(a.real.dtype, np.float32)
         # sign(det(A)) = sign(det(Q)) * sign(det(R))
         # sign(det(R))  = prod(sign(diag(R)))
         # sign(det(Q))  = prod(-1 for each non-trivial Householder, +1 for trivial)
@@ -128,7 +126,7 @@ class QR(AbstractDirectLinearSolver):
         # This holds for any shape since QR assumes full rank.
         sign_R = jnp.prod(jnp.sign(jnp.diag(a))).real
         sign_Q = jnp.prod(jnp.where(taus != 0, -1.0, 1.0))
-        sign = (sign_R * sign_Q).astype(float_dtype)
+        sign = (sign_R * sign_Q).astype(a.real.dtype)
         return sign, lad
 
     def assume_full_rank(self):
