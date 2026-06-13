@@ -58,16 +58,6 @@ def _det_sign_error_msg(
     )
 
 
-def _prep_state(operator, solver, options, state):
-    """Apply the sentinel dance and stop_gradient, mirroring linear_solve."""
-    if state is sentinel:
-        dynamic_op, static_op = eqx.partition(operator, eqx.is_array)
-        stopped_op = eqx.combine(lax.stop_gradient(dynamic_op), static_op)
-        state = solver.init(stopped_op, options)
-    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
-    state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
-    return state
-
 
 @eqx.filter_custom_jvp
 def _slogdet(operator, solver, options, state):
@@ -147,7 +137,12 @@ def slogdet(
     """
     if options is None:
         options = {}
-    state = _prep_state(operator, solver, options, state)
+    if state is sentinel:
+        dynamic_op, static_op = eqx.partition(operator, eqx.is_array)
+        stopped_op = eqx.combine(lax.stop_gradient(dynamic_op), static_op)
+        state = solver.init(stopped_op, options)
+    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
+    state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
     return _slogdet(operator, solver, options, state)
 
 
@@ -188,8 +183,7 @@ def determinant(
     """
     if options is None:
         options = {}
-    state = _prep_state(operator, solver, options, state)
-    sign, lad = _slogdet(operator, solver, options, state)
+    sign, lad = slogdet(operator, solver, options=options, state=state)
     det = sign * jnp.exp(lad)
     if throw:
         msg = _det_sign_error_msg(solver, operator)
