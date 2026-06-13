@@ -97,29 +97,24 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
         (u, s, vt), _ = state
         m, _ = u.shape
         _, n = vt.shape
-        if m != n:
-            raise ValueError(
-                "`SVD.slogdet` is only defined for square operators. "
-                "The determinant is not defined for non-square operators."
-            )
         rcond = resolve_rcond(self.rcond, n, m, s.dtype)
         rcond_arr = jnp.array(rcond, dtype=s.dtype)
         if s.size > 0:
             threshold = rcond_arr * s[0]
         else:
             threshold = rcond_arr
-        is_full_rank = jnp.all(s > threshold)
+        mask = s > threshold
+        # Log-pseudodeterminant: sum of logs of non-zero singular values only.
+        # Zero singular values (below threshold) contribute 0 via log(1) = 0.
+        # For full-rank operators this equals the true logabsdet.
+        safe_s = jnp.where(mask, s, 1.0)
+        lad = jnp.sum(jnp.log(safe_s))
+        # Sign is not recoverable from SVD alone:
+        #   full-rank square: needs sign(det(U)) * sign(det(V^T)), O(n^3) extra work
+        #   full-rank rectangular: future work via QR Householder vectors
+        #   rank-deficient: needs an eigensolver for pseudodeterminant sign
         float_dtype = jnp.result_type(s.dtype, jnp.float32)
-        # Rank-deficient: det = 0 by definition, so sign(det) = 0 and lad = -inf.
-        # This is detectable from the singular values via the rcond threshold.
-        # Full-rank: recovering sign(det(U)) * sign(det(V^T)) requires O(n^3) work;
-        # return nan and recommend lx.LU() instead.
-        sign = jnp.where(is_full_rank,
-                         jnp.full((), jnp.nan, dtype=float_dtype),
-                         jnp.zeros((), dtype=float_dtype))
-        lad = jnp.where(is_full_rank,
-                        jnp.sum(jnp.log(s)),
-                        jnp.full((), -jnp.inf, dtype=float_dtype))
+        sign = jnp.full((), jnp.nan, dtype=float_dtype)
         return sign, lad
 
     def assume_full_rank(self):
