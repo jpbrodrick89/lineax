@@ -15,12 +15,14 @@
 from typing import Any
 
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jaxtyping import Array
 
+from ._custom_types import sentinel
 from ._operator import AbstractLinearOperator, TangentLinearOperator
 from ._solve import AbstractDirectLinearSolver, linear_solve
 from ._solver.normal import Normal
@@ -56,29 +58,29 @@ def _det_sign_error_msg(
     )
 
 
-def _stop_gradient_state(state):
-    dynamic, static = eqx.partition(state, eqx.is_array)
-    dynamic = lax.stop_gradient(dynamic)
-    return eqx.combine(dynamic, static)
+def _prep_state(operator, solver, options, state):
+    """Apply the sentinel dance and stop_gradient, mirroring linear_solve."""
+    if state is sentinel:
+        dynamic_op, static_op = eqx.partition(operator, eqx.is_array)
+        stopped_op = eqx.combine(lax.stop_gradient(dynamic_op), static_op)
+        state = solver.init(stopped_op, options)
+    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
+    state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
+    return state
 
 
 @eqx.filter_custom_jvp
-def _slogdet_p(operator, solver, options, state):
-    if state is None:
-        state = solver.init(operator, options)
-    state = _stop_gradient_state(state)
+def _slogdet(operator, solver, options, state):
+    state = eqxi.nondifferentiable(state, name="`lx.slogdet` state")
     return solver.slogdet(state, options)
 
 
-@_slogdet_p.def_jvp
-def _slogdet_p_jvp(primals, tangents):
+@_slogdet.def_jvp
+def _slogdet_jvp(primals, tangents):
     operator, solver, options, state = primals
     t_operator, _, _, _ = tangents
 
-    # Primal — mirror _slogdet_p exactly, including the stop_gradient
-    if state is None:
-        state = solver.init(operator, options)
-    state = _stop_gradient_state(state)
+    # Primal — state is already stop-gradiented by the caller
     sign, lad = solver.slogdet(state, options)
 
     # Tangent: d(lad)/dA = trace(A† dA), where A† is the pseudoinverse
@@ -89,7 +91,7 @@ def _slogdet_p_jvp(primals, tangents):
         dA = TangentLinearOperator(operator, t_operator).as_matrix()  # (m, n)
 
         def solve_col(col):
-            # Solve A x = col; reuse the stopped state for efficiency
+            # Reuse the stopped state for efficiency
             return linear_solve(operator, col, solver, state=state, throw=False).value
 
         # vmap over the n columns of dA; each solve gives an n-vector
@@ -115,7 +117,7 @@ def slogdet(
     solver: "AbstractDirectLinearSolver | Normal",
     *,
     options: dict[str, Any] | None = None,
-    state: Any = None,
+    state: Any = sentinel,
 ) -> tuple[Array, Array]:
     """Compute `(sign, log|det(operator)|)` using the given direct solver.
 
@@ -145,7 +147,8 @@ def slogdet(
     """
     if options is None:
         options = {}
-    return _slogdet_p(operator, solver, options, state)
+    state = _prep_state(operator, solver, options, state)
+    return _slogdet(operator, solver, options, state)
 
 
 def determinant(
@@ -153,7 +156,7 @@ def determinant(
     solver: "AbstractDirectLinearSolver | Normal",
     *,
     options: dict[str, Any] | None = None,
-    state: Any = None,
+    state: Any = sentinel,
     throw: bool = True,
 ) -> Array:
     """Compute det(operator) using the given direct solver.
@@ -185,7 +188,8 @@ def determinant(
     """
     if options is None:
         options = {}
-    sign, lad = _slogdet_p(operator, solver, options, state)
+    state = _prep_state(operator, solver, options, state)
+    sign, lad = _slogdet(operator, solver, options, state)
     det = sign * jnp.exp(lad)
     if throw:
         msg = _det_sign_error_msg(solver, operator)
