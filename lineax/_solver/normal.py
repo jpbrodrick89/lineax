@@ -17,6 +17,7 @@ from typing import Any, TypeVar
 
 import equinox.internal as eqxi
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, PyTree
 
 from .._operator import conj, linearise, materialise, TaggedLinearOperator
@@ -199,7 +200,7 @@ class Normal(
         # The gram matrix construction destroys sign information, so sign is nan.
         _, inner_lad = self.inner_solver.slogdet(inner_state, inner_options)  # pyright: ignore[reportAttributeAccessIssue]
         lad = 0.5 * inner_lad
-        sign = jnp.full((), jnp.nan, dtype=jnp.result_type(lad.dtype, jnp.float32))
+        sign = jnp.full((), jnp.nan, dtype=np.result_type(lad.dtype, np.float32))
         return sign, lad
 
 

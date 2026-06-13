@@ -17,6 +17,7 @@ from typing import Any, TypeAlias
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.scipy as jsp
+import numpy as np
 from jaxtyping import Array, PyTree
 
 from .._misc import resolve_rcond
@@ -113,7 +114,7 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
         #   full-rank square: needs sign(det(U)) * sign(det(V^T)), O(n^3) extra work
         #   full-rank rectangular: future work via QR Householder vectors
         #   rank-deficient: needs an eigensolver for pseudodeterminant sign
-        float_dtype = jnp.result_type(s.dtype, jnp.float32)
+        float_dtype = np.result_type(s.dtype, np.float32)
         sign = jnp.full((), jnp.nan, dtype=float_dtype)
         return sign, lad
 
