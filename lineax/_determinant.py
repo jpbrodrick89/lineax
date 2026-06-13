@@ -15,16 +15,23 @@
 from typing import Any
 
 import equinox as eqx
+import jax
+import jax.lax as lax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from jaxtyping import Array
 
-from ._operator import AbstractLinearOperator
-from ._solve import AbstractDirectLinearSolver
+from ._operator import AbstractLinearOperator, TangentLinearOperator
+from ._solve import AbstractDirectLinearSolver, linear_solve
 from ._solver.normal import Normal
 
 
+def _is_none(x):
+    return x is None
+
+
 def _det_sign_error_msg(
-    solver: AbstractDirectLinearSolver | Normal,
+    solver: "AbstractDirectLinearSolver | Normal",
     operator: AbstractLinearOperator,
 ) -> str:
     if not solver.assume_full_rank():
@@ -49,9 +56,63 @@ def _det_sign_error_msg(
     )
 
 
+def _stop_gradient_state(state):
+    dynamic, static = eqx.partition(state, eqx.is_array)
+    dynamic = lax.stop_gradient(dynamic)
+    return eqx.combine(dynamic, static)
+
+
+@eqx.filter_custom_jvp
+def _slogdet_p(operator, solver, options, state):
+    if state is None:
+        state = solver.init(operator, options)
+    state = _stop_gradient_state(state)
+    return solver.slogdet(state, options)
+
+
+@_slogdet_p.def_jvp
+def _slogdet_p_jvp(primals, tangents):
+    operator, solver, options, state = primals
+    t_operator, _, _, _ = tangents
+
+    # Primal — mirror _slogdet_p exactly, including the stop_gradient
+    if state is None:
+        state = solver.init(operator, options)
+    state = _stop_gradient_state(state)
+    sign, lad = solver.slogdet(state, options)
+
+    # Tangent: d(lad)/dA = trace(A† dA), where A† is the pseudoinverse
+    has_t_op = any(
+        t is not None for t in jtu.tree_leaves(t_operator, is_leaf=_is_none)
+    )
+    if has_t_op:
+        dA = TangentLinearOperator(operator, t_operator).as_matrix()  # (m, n)
+
+        def solve_col(col):
+            # Solve A x = col; reuse the stopped state for efficiency
+            return linear_solve(operator, col, solver, state=state, throw=False).value
+
+        # vmap over the n columns of dA; each solve gives an n-vector
+        # X[i] = A† dA[:,i], so trace(A† dA) = trace(X)
+        X = jax.vmap(solve_col)(dA.T)  # (n, n)
+        lad_dot = jnp.trace(X)
+
+        if jnp.issubdtype(dA.dtype, jnp.complexfloating):
+            # For complex A: sign carries the imaginary part of the trace
+            sign_dot = (lad_dot - jnp.real(lad_dot).astype(lad_dot.dtype)) * sign
+            lad_dot = jnp.real(lad_dot)
+        else:
+            sign_dot = jnp.zeros_like(sign)
+    else:
+        sign_dot = jnp.zeros_like(sign)
+        lad_dot = jnp.zeros_like(lad)
+
+    return (sign, lad), (sign_dot, lad_dot)
+
+
 def slogdet(
     operator: AbstractLinearOperator,
-    solver: AbstractDirectLinearSolver | Normal,
+    solver: "AbstractDirectLinearSolver | Normal",
     *,
     options: dict[str, Any] | None = None,
     state: Any = None,
@@ -71,10 +132,10 @@ def slogdet(
 
         !!! warning
 
-            Do **not** apply `lax.stop_gradient` to this state. The sign and
-            log-absolute-determinant are computed directly from the factorisation,
-            so gradients must flow through the state for `slogdet` to be
-            differentiable with respect to the operator.
+            Do **not** apply `lax.stop_gradient` to this state. `slogdet` applies
+            it internally (like [`lineax.linear_solve`][]) and uses an analytic JVP
+            rule for differentiation. Manually stopping gradients before passing the
+            state will break the JVP.
 
     **Returns:**
 
@@ -84,14 +145,12 @@ def slogdet(
     """
     if options is None:
         options = {}
-    if state is None:
-        state = solver.init(operator, options)
-    return solver.slogdet(state, options)
+    return _slogdet_p(operator, solver, options, state)
 
 
 def determinant(
     operator: AbstractLinearOperator,
-    solver: AbstractDirectLinearSolver | Normal,
+    solver: "AbstractDirectLinearSolver | Normal",
     *,
     options: dict[str, Any] | None = None,
     state: Any = None,
@@ -110,10 +169,10 @@ def determinant(
 
         !!! warning
 
-            Do **not** apply `lax.stop_gradient` to this state. The determinant
-            is computed directly from the factorisation, so gradients must flow
-            through the state for `determinant` to be differentiable with respect
-            to the operator.
+            Do **not** apply `lax.stop_gradient` to this state. `determinant`
+            applies it internally (like [`lineax.linear_solve`][]) and uses an
+            analytic JVP rule for differentiation. Manually stopping gradients
+            before passing the state will break the JVP.
 
     - `throw`: if `True` (the default), raise an error when the sign of the
         determinant is not available (e.g. when using [`lineax.Normal`][] or
@@ -126,9 +185,7 @@ def determinant(
     """
     if options is None:
         options = {}
-    if state is None:
-        state = solver.init(operator, options)
-    sign, lad = solver.slogdet(state, options)
+    sign, lad = _slogdet_p(operator, solver, options, state)
     det = sign * jnp.exp(lad)
     if throw:
         msg = _det_sign_error_msg(solver, operator)
