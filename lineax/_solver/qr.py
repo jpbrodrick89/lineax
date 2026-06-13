@@ -115,10 +115,20 @@ class QR(AbstractDirectLinearSolver):
         return conj_state, conj_options
 
     def slogdet(self, state: _QRState, options: dict[str, Any]) -> tuple[Array, Array]:
-        raise NotImplementedError(
-            "`QR` does not support `slogdet`: `geqrf` has no JAX AD rules. "
-            "Use `lx.LU()` or `lx.SVD()` instead."
-        )
+        del options
+        (a, taus), transpose, _ = state
+        # diag(a) = diag(h.mT) = diag(h) = diag(R) for both tall and wide inputs
+        lad = jnp.sum(jnp.log(jnp.abs(jnp.diag(a))))
+        float_dtype = jnp.result_type(a.real.dtype, jnp.float32)
+        # sign(det(A)) = sign(det(Q)) * sign(det(R))
+        # sign(det(R))  = prod(sign(diag(R)))
+        # sign(det(Q))  = prod(-1 for each non-trivial Householder, +1 for trivial)
+        # A Householder reflector is trivial iff tau == 0
+        # This holds for any shape since QR assumes full rank.
+        sign_R = jnp.prod(jnp.sign(jnp.diag(a))).real
+        sign_Q = jnp.prod(jnp.where(taus != 0, -1.0, 1.0))
+        sign = (sign_R * sign_Q).astype(float_dtype)
+        return sign, lad
 
     def assume_full_rank(self):
         return True
