@@ -94,19 +94,16 @@ class LU(AbstractDirectLinearSolver[_LUState]):
         conj_options = {}
         return conj_state, conj_options
 
-    def logabsdet(self, state: _LUState, options: dict[str, Any]) -> Array:
-        del options
-        (lu, piv), _, _ = state
-        return jnp.sum(jnp.log(jnp.abs(jnp.diag(lu))))
-
-    def det_sign(self, state: _LUState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _LUState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         (lu, piv), _, _ = state
         n = lu.shape[0]
         num_swaps = jnp.sum(piv != jnp.arange(n, dtype=piv.dtype))
         perm_sign = jnp.where(num_swaps % 2 == 0, 1, -1)
         diag_sign = jnp.prod(jnp.sign(jnp.diag(lu)))
-        return (perm_sign * diag_sign).astype(lu.real.dtype)
+        sign = (perm_sign * diag_sign).astype(lu.real.dtype)
+        lad = jnp.sum(jnp.log(jnp.abs(jnp.diag(lu))))
+        return sign, lad
 
     def assume_full_rank(self):
         return True

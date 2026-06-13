@@ -114,16 +114,10 @@ class QR(AbstractDirectLinearSolver):
         conj_options = {}
         return conj_state, conj_options
 
-    def logabsdet(self, state: _QRState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _QRState, options: dict[str, Any]) -> tuple[Array, Array]:
         raise NotImplementedError(
-            "`QR` does not support `logabsdet`: `geqrf` has no JAX AD rules. "
-            "Use `LU` or `SVD` instead."
-        )
-
-    def det_sign(self, state: _QRState, options: dict[str, Any]) -> Array:
-        raise NotImplementedError(
-            "`QR` does not support `det_sign`: `geqrf` has no JAX AD rules. "
-            "Use `LU` instead."
+            "`QR` does not support `slogdet`: `geqrf` has no JAX AD rules. "
+            "Use `lx.LU()` or `lx.SVD()` instead."
         )
 
     def assume_full_rank(self):

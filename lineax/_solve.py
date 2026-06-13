@@ -489,10 +489,12 @@ class AbstractDirectLinearSolver(AbstractLinearSolver[_SolverState]):
     """
 
     @abc.abstractmethod
-    def logabsdet(
+    def slogdet(
         self, state: _SolverState, options: dict[str, Any]
-    ) -> Array:
-        """Compute log|det(operator)| from the factored state.
+    ) -> tuple[Array, Array]:
+        """Compute `(sign, log|det(operator)|)` from the factored state.
+
+        Follows the same convention as `numpy.linalg.slogdet`.
 
         **Arguments:**
 
@@ -501,24 +503,9 @@ class AbstractDirectLinearSolver(AbstractLinearSolver[_SolverState]):
 
         **Returns:**
 
-        A scalar array equal to the log of the absolute value of the determinant.
-        """
-
-    @abc.abstractmethod
-    def det_sign(
-        self, state: _SolverState, options: dict[str, Any]
-    ) -> Array:
-        """Compute sign(det(operator)) from the factored state.
-
-        **Arguments:**
-
-        - `state`: as returned from [`lineax.AbstractLinearSolver.init`][].
-        - `options`: any extra options that were passed to `solver.init`.
-
-        **Returns:**
-
-        A scalar array equal to the sign of the determinant (+1, -1, or 0 for real
-        operators; a unit complex number for complex operators).
+        A 2-tuple of `(sign, logabsdet)`.  `sign` is `nan` when it cannot be
+        recovered from the factorisation (e.g. gram-matrix solvers such as
+        [`lineax.Normal`][], or [`lineax.SVD`][]).
         """
 
 

@@ -16,6 +16,7 @@ from copy import copy
 from typing import Any, TypeVar
 
 import equinox.internal as eqxi
+import jax.numpy as jnp
 from jaxtyping import Array, PyTree
 
 from .._operator import conj, linearise, materialise, TaggedLinearOperator
@@ -178,16 +179,16 @@ class Normal(
     def assume_full_rank(self):
         return self.inner_solver.assume_full_rank()
 
-    def logabsdet(
+    def slogdet(
         self,
         state: tuple[
             _InnerSolverState, eqxi.Static, AbstractLinearOperator, dict[str, Any]
         ],
         options: dict[str, Any],
-    ) -> Array:
+    ) -> tuple[Array, Array]:
         if not is_direct(self.inner_solver):
             raise TypeError(
-                f"`Normal.logabsdet` requires a direct inner solver, "
+                f"`Normal.slogdet` requires a direct inner solver, "
                 f"got {type(self.inner_solver).__name__}. "
                 f"Use a direct solver such as `lx.Cholesky()` or `lx.LU()`."
             )
@@ -195,19 +196,11 @@ class Normal(
         # log|det(A^H A)| = 2 * log|det(A)| for tall A (m >= n)
         # log|det(A A^H)| = 2 * log|det(A)| for wide A (m < n)
         # so log|det(A)| = 0.5 * log|det(normal_operator)|
-        return 0.5 * self.inner_solver.logabsdet(inner_state, inner_options)
-
-    def det_sign(
-        self,
-        state: tuple[
-            _InnerSolverState, eqxi.Static, AbstractLinearOperator, dict[str, Any]
-        ],
-        options: dict[str, Any],
-    ) -> Array:
-        raise NotImplementedError(
-            "`Normal` cannot recover `det_sign`: squaring the operator destroys "
-            "sign information. Use `lx.LU()` to compute the sign of the determinant."
-        )
+        # The gram matrix construction destroys sign information, so sign is nan.
+        _, inner_lad = self.inner_solver.slogdet(inner_state, inner_options)  # pyright: ignore[reportAttributeAccessIssue]
+        lad = 0.5 * inner_lad
+        sign = jnp.full((), jnp.nan, dtype=jnp.result_type(lad.dtype, jnp.float32))
+        return sign, lad
 
 
 Normal.__init__.__doc__ = """**Arguments:**
@@ -218,7 +211,7 @@ Normal.__init__.__doc__ = """**Arguments:**
 
 
 def is_direct(solver: AbstractLinearSolver) -> bool:
-    """Returns `True` if `solver` is a direct solver that supports `logabsdet`.
+    """Returns `True` if `solver` is a direct solver that supports `slogdet`.
 
     Direct solvers (e.g. [`lineax.LU`][], [`lineax.Cholesky`][],
     [`lineax.SVD`][], [`lineax.Triangular`][], [`lineax.Diagonal`][],

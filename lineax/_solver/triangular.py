@@ -112,19 +112,17 @@ class Triangular(AbstractDirectLinearSolver[_TriangularState]):
         conj_options = {}
         return conj_state, conj_options
 
-    def logabsdet(self, state: _TriangularState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _TriangularState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         matrix, _, unit_diagonal, _, _ = state
         if unit_diagonal.value:
-            return jnp.zeros((), dtype=matrix.real.dtype)
-        return jnp.sum(jnp.log(jnp.abs(jnp.diag(matrix))))
-
-    def det_sign(self, state: _TriangularState, options: dict[str, Any]) -> Array:
-        del options
-        matrix, _, unit_diagonal, _, _ = state
-        if unit_diagonal.value:
-            return jnp.ones((), dtype=matrix.real.dtype)
-        return jnp.prod(jnp.sign(jnp.diag(matrix))).real
+            sign = jnp.ones((), dtype=matrix.real.dtype)
+            lad = jnp.zeros((), dtype=matrix.real.dtype)
+        else:
+            d = jnp.diag(matrix)
+            sign = jnp.prod(jnp.sign(d)).real
+            lad = jnp.sum(jnp.log(jnp.abs(d)))
+        return sign, lad
 
     def assume_full_rank(self):
         return True

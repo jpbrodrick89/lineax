@@ -92,17 +92,14 @@ class Cholesky(AbstractDirectLinearSolver[_CholeskyState]):
         factor, is_nsd = state
         return (factor.conj(), is_nsd), options
 
-    def logabsdet(self, state: _CholeskyState, options: dict[str, Any]) -> Array:
-        del options
-        factor, _ = state
-        return 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(factor))))
-
-    def det_sign(self, state: _CholeskyState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _CholeskyState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         factor, is_nsd = state
         n = factor.shape[0]
-        sign = -1 if (is_nsd.value and n % 2 == 1) else 1
-        return jnp.array(sign, dtype=jnp.result_type(factor.real.dtype, jnp.float32))
+        sign_val = -1 if (is_nsd.value and n % 2 == 1) else 1
+        sign = jnp.array(sign_val, dtype=jnp.result_type(factor.real.dtype, jnp.float32))
+        lad = 2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(factor))))
+        return sign, lad
 
     def assume_full_rank(self):
         return True

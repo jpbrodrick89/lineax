@@ -14,6 +14,7 @@
 
 from typing import Any, TypeAlias
 
+import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array
 
@@ -23,6 +24,31 @@ from ._solver.normal import Normal
 
 
 MaybeDirectLinearSolver: TypeAlias = AbstractDirectLinearSolver | Normal
+
+
+def _det_sign_error_msg(solver: MaybeDirectLinearSolver, operator: AbstractLinearOperator) -> str:
+    if isinstance(solver, Normal):
+        return (
+            "`lx.determinant` with `Normal`: sign of the determinant is not "
+            "recoverable — the gram matrix construction destroys sign information. "
+            "Use `lx.LU()` instead."
+        )
+    if operator.in_size() != operator.out_size():
+        return (
+            "`lx.determinant`: sign of the determinant is undefined for non-square "
+            "operators. Use `lx.logabsdet` for the log absolute value, or a square "
+            "operator."
+        )
+    if not solver.assume_full_rank():
+        return (
+            f"`lx.determinant` with `{type(solver).__name__}`: sign of the "
+            "determinant is not available from this solver's factorisation. "
+            "Use `lx.LU()` instead."
+        )
+    return (
+        f"`lx.determinant` with `{type(solver).__name__}`: sign of the determinant "
+        "is not available from this solver's factorisation. Use `lx.LU()` instead."
+    )
 
 
 def slogdet(
@@ -43,12 +69,13 @@ def slogdet(
 
     **Returns:**
 
-    A 2-tuple of `(sign, logabsdet)`.
+    A 2-tuple of `(sign, logabsdet)`. `sign` is `nan` when the solver cannot
+    recover it (e.g. [`lineax.Normal`][] or [`lineax.SVD`][]).
     """
     if options is None:
         options = {}
     state = solver.init(operator, options)
-    return solver.det_sign(state, options), solver.logabsdet(state, options)
+    return solver.slogdet(state, options)
 
 
 def logabsdet(
@@ -72,7 +99,8 @@ def logabsdet(
     if options is None:
         options = {}
     state = solver.init(operator, options)
-    return solver.logabsdet(state, options)
+    _, lad = solver.slogdet(state, options)
+    return lad
 
 
 def determinant(
@@ -80,6 +108,7 @@ def determinant(
     solver: MaybeDirectLinearSolver,
     *,
     options: dict[str, Any] | None = None,
+    throw: bool = True,
 ) -> Array:
     """Compute det(operator) using the given direct solver.
 
@@ -88,6 +117,9 @@ def determinant(
     - `operator`: a linear operator.
     - `solver`: a [`lineax.MaybeDirectLinearSolver`][].
     - `options`: any extra options to pass to the solver.
+    - `throw`: if `True` (the default), raise an error when the sign of the
+        determinant is not available (e.g. when using [`lineax.Normal`][] or
+        [`lineax.SVD`][]). If `False`, a `nan` result is returned silently.
 
     **Returns:**
 
@@ -96,6 +128,9 @@ def determinant(
     if options is None:
         options = {}
     state = solver.init(operator, options)
-    sign = solver.det_sign(state, options)
-    logabs = solver.logabsdet(state, options)
-    return sign * jnp.exp(logabs)
+    sign, lad = solver.slogdet(state, options)
+    det = sign * jnp.exp(lad)
+    if throw:
+        msg = _det_sign_error_msg(solver, operator)
+        det = eqx.error_if(det, jnp.isnan(sign), msg)
+    return det

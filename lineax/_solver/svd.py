@@ -92,22 +92,21 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
         conj_options = {}
         return conj_state, conj_options
 
-    def logabsdet(self, state: _SVDState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _SVDState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         (u, s, vt), _ = state
         m, _ = u.shape
         _, n = vt.shape
         if m != n:
             raise ValueError(
-                "`SVD.logabsdet` is only defined for square operators"
+                "`SVD.slogdet` is only defined for square operators. "
+                "The determinant is not defined for non-square operators."
             )
-        return jnp.sum(jnp.log(s))
-
-    def det_sign(self, state: _SVDState, options: dict[str, Any]) -> Array:
-        raise NotImplementedError(
-            "`SVD` does not support `det_sign`: computing sign(det(U)) and "
-            "sign(det(V^T)) requires O(n³) additional work. Use `LU` instead."
-        )
+        # sign(det(U)) and sign(det(V^T)) require O(n³) extra work, so sign is
+        # returned as nan; use `lx.LU()` if the sign is needed.
+        sign = jnp.full((), jnp.nan, dtype=jnp.result_type(s.dtype, jnp.float32))
+        lad = jnp.sum(jnp.log(s))
+        return sign, lad
 
     def assume_full_rank(self):
         return False

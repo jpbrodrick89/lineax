@@ -101,19 +101,14 @@ class Diagonal(AbstractDirectLinearSolver[_DiagonalState]):
         conj_state = conj_diag, packed_structures
         return conj_state, conj_options
 
-    def logabsdet(self, state: _DiagonalState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _DiagonalState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         diag, _ = state
         if diag is None:
-            return jnp.zeros(())
-        return jnp.sum(jnp.log(jnp.abs(diag)))
-
-    def det_sign(self, state: _DiagonalState, options: dict[str, Any]) -> Array:
-        del options
-        diag, _ = state
-        if diag is None:
-            return jnp.ones(())
-        return jnp.prod(jnp.sign(diag)).real
+            return jnp.ones(()), jnp.zeros(())
+        sign = jnp.prod(jnp.sign(diag)).real
+        lad = jnp.sum(jnp.log(jnp.abs(diag)))
+        return sign, lad
 
     def assume_full_rank(self):
         return self.well_posed

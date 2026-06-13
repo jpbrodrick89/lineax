@@ -84,7 +84,7 @@ class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
         conj_state = (conj_diagonals, packed_structures)
         return conj_state, options
 
-    def logabsdet(self, state: _TridiagonalState, options: dict[str, Any]) -> Array:
+    def slogdet(self, state: _TridiagonalState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
         (diagonal, lower_diagonal, upper_diagonal), _ = state
         n = diagonal.shape[0]
@@ -96,21 +96,9 @@ class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
         pivot0 = diagonal[0]
         _, pivots_rest = lax.scan(step, pivot0, jnp.arange(1, n))
         pivots = jnp.concatenate([pivot0[None], pivots_rest])
-        return jnp.sum(jnp.log(jnp.abs(pivots)))
-
-    def det_sign(self, state: _TridiagonalState, options: dict[str, Any]) -> Array:
-        del options
-        (diagonal, lower_diagonal, upper_diagonal), _ = state
-        n = diagonal.shape[0]
-
-        def step(pivot_prev, i):
-            pivot = diagonal[i] - lower_diagonal[i - 1] * upper_diagonal[i - 1] / pivot_prev
-            return pivot, pivot
-
-        pivot0 = diagonal[0]
-        _, pivots_rest = lax.scan(step, pivot0, jnp.arange(1, n))
-        pivots = jnp.concatenate([pivot0[None], pivots_rest])
-        return jnp.prod(jnp.sign(pivots)).real
+        sign = jnp.prod(jnp.sign(pivots)).real
+        lad = jnp.sum(jnp.log(jnp.abs(pivots)))
+        return sign, lad
 
     def assume_full_rank(self):
         return True
