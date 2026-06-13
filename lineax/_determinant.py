@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, TypeAlias
+from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -23,39 +23,38 @@ from ._solve import AbstractDirectLinearSolver
 from ._solver.normal import Normal
 
 
-MaybeDirectLinearSolver: TypeAlias = AbstractDirectLinearSolver | Normal
-
-
-def _det_sign_error_msg(solver: MaybeDirectLinearSolver, operator: AbstractLinearOperator) -> str:
-    if isinstance(solver, Normal):
-        return (
-            "`lx.determinant` with `Normal`: sign of the determinant is not "
-            "recoverable — the gram matrix construction destroys sign information. "
-            "Use `lx.LU()` instead."
-        )
-    if operator.in_size() != operator.out_size():
-        return (
-            "`lx.determinant`: sign of the determinant is undefined for non-square "
-            "operators. Use `lx.logabsdet` for the log absolute value, or a square "
-            "operator."
-        )
+def _det_sign_error_msg(
+    solver: AbstractDirectLinearSolver | Normal,
+    operator: AbstractLinearOperator,
+) -> str:
     if not solver.assume_full_rank():
         return (
             f"`lx.determinant` with `{type(solver).__name__}`: sign of the "
             "determinant is not available from this solver's factorisation. "
-            "Use `lx.LU()` instead."
+            "Use `lx.LU()` for full-rank square matrices, or `lx.QR()` for "
+            "full-rank rectangular matrices."
+        )
+    if isinstance(solver, Normal):
+        return (
+            "`lx.determinant` with `Normal`: sign of the determinant is not "
+            "recoverable — the gram matrix construction destroys sign information. "
+            "To recover the sign of a full-rank rectangular matrix's "
+            "pseudodeterminant, use `lx.QR()`."
         )
     return (
         f"`lx.determinant` with `{type(solver).__name__}`: sign of the determinant "
-        "is not available from this solver's factorisation. Use `lx.LU()` instead."
+        "is not available from this solver's factorisation. "
+        "Use `lx.LU()` for full-rank square matrices, or `lx.QR()` for "
+        "full-rank rectangular matrices."
     )
 
 
 def slogdet(
     operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
+    solver: AbstractDirectLinearSolver | Normal,
     *,
     options: dict[str, Any] | None = None,
+    state: Any = None,
 ) -> tuple[Array, Array]:
     """Compute `(sign, log|det(operator)|)` using the given direct solver.
 
@@ -64,50 +63,38 @@ def slogdet(
     **Arguments:**
 
     - `operator`: a linear operator.
-    - `solver`: a [`lineax.MaybeDirectLinearSolver`][].
+    - `solver`: an [`lineax.AbstractDirectLinearSolver`][] or [`lineax.Normal`][].
     - `options`: any extra options to pass to the solver.
+    - `state`: if provided, use this pre-computed factorised state instead of
+        calling `solver.init`. Allows multiple determinant computations to share
+        the same factorisation.
+
+        !!! warning
+
+            Do **not** apply `lax.stop_gradient` to this state. The sign and
+            log-absolute-determinant are computed directly from the factorisation,
+            so gradients must flow through the state for `slogdet` to be
+            differentiable with respect to the operator.
 
     **Returns:**
 
     A 2-tuple of `(sign, logabsdet)`. `sign` is `nan` when the solver cannot
-    recover it (e.g. [`lineax.Normal`][] or [`lineax.SVD`][]).
+    recover it cheaply (e.g. [`lineax.SVD`][] on a full-rank square matrix, or
+    [`lineax.Normal`][]).
     """
     if options is None:
         options = {}
-    state = solver.init(operator, options)
+    if state is None:
+        state = solver.init(operator, options)
     return solver.slogdet(state, options)
-
-
-def logabsdet(
-    operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
-    *,
-    options: dict[str, Any] | None = None,
-) -> Array:
-    """Compute log|det(operator)| using the given direct solver.
-
-    **Arguments:**
-
-    - `operator`: a linear operator.
-    - `solver`: a [`lineax.MaybeDirectLinearSolver`][].
-    - `options`: any extra options to pass to the solver.
-
-    **Returns:**
-
-    A scalar array equal to the log of the absolute value of the determinant.
-    """
-    if options is None:
-        options = {}
-    state = solver.init(operator, options)
-    _, lad = solver.slogdet(state, options)
-    return lad
 
 
 def determinant(
     operator: AbstractLinearOperator,
-    solver: MaybeDirectLinearSolver,
+    solver: AbstractDirectLinearSolver | Normal,
     *,
     options: dict[str, Any] | None = None,
+    state: Any = None,
     throw: bool = True,
 ) -> Array:
     """Compute det(operator) using the given direct solver.
@@ -115,11 +102,23 @@ def determinant(
     **Arguments:**
 
     - `operator`: a linear operator.
-    - `solver`: a [`lineax.MaybeDirectLinearSolver`][].
+    - `solver`: an [`lineax.AbstractDirectLinearSolver`][] or [`lineax.Normal`][].
     - `options`: any extra options to pass to the solver.
+    - `state`: if provided, use this pre-computed factorised state instead of
+        calling `solver.init`. Allows multiple determinant computations to share
+        the same factorisation.
+
+        !!! warning
+
+            Do **not** apply `lax.stop_gradient` to this state. The determinant
+            is computed directly from the factorisation, so gradients must flow
+            through the state for `determinant` to be differentiable with respect
+            to the operator.
+
     - `throw`: if `True` (the default), raise an error when the sign of the
         determinant is not available (e.g. when using [`lineax.Normal`][] or
-        [`lineax.SVD`][]). If `False`, a `nan` result is returned silently.
+        [`lineax.SVD`][] on a full-rank square matrix). If `False`, a `nan`
+        result is returned silently.
 
     **Returns:**
 
@@ -127,7 +126,8 @@ def determinant(
     """
     if options is None:
         options = {}
-    state = solver.init(operator, options)
+    if state is None:
+        state = solver.init(operator, options)
     sign, lad = solver.slogdet(state, options)
     det = sign * jnp.exp(lad)
     if throw:

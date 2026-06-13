@@ -48,8 +48,6 @@ from ._operator import (
 from ._solution import RESULTS as RESULTS, Solution as Solution
 from ._determinant import (
     determinant as determinant,
-    logabsdet as logabsdet,
-    MaybeDirectLinearSolver as MaybeDirectLinearSolver,
     slogdet as slogdet,
 )
 from ._solve import (

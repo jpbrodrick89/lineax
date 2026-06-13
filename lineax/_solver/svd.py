@@ -102,10 +102,24 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
                 "`SVD.slogdet` is only defined for square operators. "
                 "The determinant is not defined for non-square operators."
             )
-        # sign(det(U)) and sign(det(V^T)) require O(n³) extra work, so sign is
-        # returned as nan; use `lx.LU()` if the sign is needed.
-        sign = jnp.full((), jnp.nan, dtype=jnp.result_type(s.dtype, jnp.float32))
-        lad = jnp.sum(jnp.log(s))
+        rcond = resolve_rcond(self.rcond, n, m, s.dtype)
+        rcond_arr = jnp.array(rcond, dtype=s.dtype)
+        if s.size > 0:
+            threshold = rcond_arr * s[0]
+        else:
+            threshold = rcond_arr
+        is_full_rank = jnp.all(s > threshold)
+        float_dtype = jnp.result_type(s.dtype, jnp.float32)
+        # Rank-deficient: det = 0 by definition, so sign(det) = 0 and lad = -inf.
+        # This is detectable from the singular values via the rcond threshold.
+        # Full-rank: recovering sign(det(U)) * sign(det(V^T)) requires O(n^3) work;
+        # return nan and recommend lx.LU() instead.
+        sign = jnp.where(is_full_rank,
+                         jnp.full((), jnp.nan, dtype=float_dtype),
+                         jnp.zeros((), dtype=float_dtype))
+        lad = jnp.where(is_full_rank,
+                        jnp.sum(jnp.log(s)),
+                        jnp.full((), -jnp.inf, dtype=float_dtype))
         return sign, lad
 
     def assume_full_rank(self):
