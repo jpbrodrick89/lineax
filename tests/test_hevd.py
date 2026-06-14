@@ -30,6 +30,49 @@ def _hermitian(getkey, size, dtype):
     return matrix + matrix.conj().T
 
 
+def _hermitian_with_spectrum(getkey, eigvals, dtype):
+    """A Hermitian matrix `Q diag(eigvals) Q^H` with `Q` (real/complex) unitary.
+
+    Lets us place exact zero eigenvalues *between* large eigenvalues of both signs,
+    which (after eigh's ascending sort) is the case that stresses HEVD's
+    magnitude-based masking and truncation -- the eigenpairs to discard are in the
+    interior of the spectrum, not at a contiguous tail.
+    """
+    n = len(eigvals)
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (n, n), dtype=dtype))
+    d = jnp.asarray(eigvals, dtype=dtype)
+    return (q * d[None, :]) @ q.conj().T
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_hevd_indefinite_rank_deficient(getkey, dtype):
+    # Indefinite (both signs) AND rank-deficient (interior zeros).
+    eigvals = [4.0, -3.0, 0.0, 0.0, 2.0]
+    matrix = _hermitian_with_spectrum(getkey, eigvals, dtype)
+    operator = lx.MatrixLinearOperator(matrix, lx.hermitian_tag)
+    b = matrix @ jr.normal(getkey(), (5,), dtype=dtype)
+
+    hevd = lx.linear_solve(operator, b, solver=lx.HEVD(), throw=False)
+    lstsq, *_ = jnp.linalg.lstsq(matrix, b)
+    assert tree_allclose(hevd.value, lstsq, atol=tol, rtol=tol)
+    # Two interior eigenvalues are (numerically) zero -> effective rank 3.
+    assert int(hevd.stats["rank"]) == 3
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_hevd_indefinite_max_rank_truncation(getkey, dtype):
+    # The r=3 largest-magnitude eigenvalues are {4, -3, 2}: of *both* signs and not
+    # contiguous in eigh's ascending order, so truncation must select by magnitude.
+    eigvals = [4.0, -3.0, 0.0, 0.0, 2.0]
+    matrix = _hermitian_with_spectrum(getkey, eigvals, dtype)
+    b = matrix @ jr.normal(getkey(), (5,), dtype=dtype)
+
+    operator = lx.MatrixLinearOperator(matrix, (lx.hermitian_tag, lx.MaxRankTag(3)))
+    truncated = lx.linear_solve(operator, b, solver=lx.HEVD(), throw=False).value
+    lstsq, *_ = jnp.linalg.lstsq(matrix, b)
+    assert tree_allclose(truncated, lstsq, atol=tol, rtol=tol)
+
+
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_hevd_matches_svd_indefinite(getkey, dtype):
     # An indefinite Hermitian matrix (eigenvalues of both signs) is the case where
