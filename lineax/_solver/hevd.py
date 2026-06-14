@@ -60,24 +60,29 @@ class HEVD(AbstractLinearSolver[_HEVDState]):
                 "operators. (Real-symmetric operators are Hermitian.)"
             )
         w, v = jnp.linalg.eigh(operator.as_matrix())
-        # `jnp.linalg.eigh` returns eigenvalues in *ascending* order, whereas
-        # `SVD` works with singular values in *descending* order. Reorder by
-        # descending magnitude so that the rcond/truncation logic below mirrors
-        # `SVD` exactly. Eigenvalues are signed (unlike singular values), so we
-        # sort by `abs` and keep the sign for the later reciprocal.
-        order = jnp.argsort(jnp.abs(w))[::-1]
-        w = w[order]
-        v = v[:, order]
-        # If the operator is known to have rank at most `r`, the trailing
-        # eigenvalues are mathematically zero, so statically truncate to the
-        # leading `r` (largest-magnitude) components.
+        # `jnp.linalg.eigh` returns eigenvalues in ascending (signed) order. In the
+        # common case we leave them in that order: `compute` masks the small
+        # eigenvalues by magnitude and so does not care about the ordering.
         r = max_rank(operator)
         if r < w.shape[0]:
+            # The operator is declared to have rank at most `r`, so all but the `r`
+            # largest-magnitude eigenvalues are mathematically zero. Statically drop
+            # them to shrink the matmuls (and storage) in `compute`.
+            #
+            # Unlike `SVD`'s singular values -- already sorted descending, so
+            # truncation is a free slice -- eigenvalues are signed and ascending, so
+            # the small-magnitude ones sit in the *interior* of the spectrum.
+            # Selecting the `r` largest-magnitude therefore needs a reordering
+            # gather. We only pay for it when a rank tag is actually present, and it
+            # is O(n^2): dominated by the O(n^3) eigendecomposition above.
+            order = jnp.argsort(jnp.abs(w))[::-1]
+            w = w[order]
+            v = v[:, order]
             # `compute` masks out `|w_i| <= rcond * max|w|`, so dropping the tail is
             # lossless iff it all sits below that floor (using the same rcond).
             # Otherwise the `max_rank` claim is false and truncating would change
-            # the solution. `w` is sorted by descending magnitude, so testing the
-            # largest discarded value `|w[r]|` certifies the tail.
+            # the solution. `w` is now sorted by descending magnitude, so testing
+            # the largest discarded value `|w[r]|` certifies the tail.
             m = v.shape[0]
             # w.size > 0 since r < size
             rcond = resolve_rcond(self.rcond, m, m, w.dtype) * jnp.abs(w[0])
@@ -111,8 +116,8 @@ class HEVD(AbstractLinearSolver[_HEVDState]):
         rcond = jnp.array(rcond, dtype=w.dtype)
         abs_w = jnp.abs(w)
         if w.size > 0:
-            # `w` is sorted by descending magnitude, so `abs_w[0]` is the largest.
-            rcond = rcond * abs_w[0]
+            # `w` is not assumed sorted, so take the largest magnitude directly.
+            rcond = rcond * jnp.max(abs_w)
         # Not >=, or this fails with a matrix of all-zeros.
         mask = abs_w > rcond
         rank = mask.sum()

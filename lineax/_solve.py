@@ -36,6 +36,7 @@ from ._operator import (
     FunctionLinearOperator,
     IdentityLinearOperator,
     is_diagonal,
+    is_hermitian,
     is_lower_triangular,
     is_negative_semidefinite,
     is_positive_semidefinite,
@@ -498,6 +499,7 @@ _triangular_token = eqxi.str2jax("triangular_token")
 _cholesky_token = eqxi.str2jax("cholesky_token")
 _lu_token = eqxi.str2jax("lu_token")
 _svd_token = eqxi.str2jax("svd_token")
+_hevd_token = eqxi.str2jax("hevd_token")
 
 
 # Ugly delayed import because we have the dependency chain
@@ -518,6 +520,7 @@ def _lookup(token) -> AbstractLinearSolver:
         _cholesky_token: _solver.Cholesky(),  # pyright: ignore
         _lu_token: _solver.LU(),  # pyright: ignore
         _svd_token: _solver.SVD(),  # pyright: ignore
+        _hevd_token: _solver.HEVD(),  # pyright: ignore
     }
     return _lookup_dict[token]
 
@@ -542,6 +545,7 @@ class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
 
     - If `well_posed=False`:
         - If the operator is diagonal, then use [`lineax.Diagonal`][].
+        - If the operator is Hermitian, then use [`lineax.HEVD`][].
         - Else use [`lineax.SVD`][].
 
     This is a good choice if you want to be certain that you can handle ill-posed
@@ -587,6 +591,10 @@ class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
         elif self.well_posed is False:
             if is_diagonal(operator):
                 token = _diagonal_token
+            elif is_hermitian(operator):
+                # A Hermitian eigendecomposition is cheaper than a general SVD, and
+                # handles ill-posed Hermitian systems via the same pseudoinverse.
+                token = _hevd_token
             else:
                 # TODO: use rank-revealing QR instead.
                 token = _svd_token
