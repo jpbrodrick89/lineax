@@ -198,6 +198,19 @@ class AbstractLinearOperator(eqx.Module):
         """Equivalent to [`lineax.AbstractLinearOperator.transpose`][]"""
         return self.transpose()
 
+    @property
+    def H(self) -> "AbstractLinearOperator":
+        """The conjugate transpose (Hermitian adjoint) `Aᴴ` of this operator.
+
+        Equivalent to `lineax.conj(operator).transpose()`, except that for a Hermitian
+        operator -- for which `Aᴴ = A` -- this is a no-op and returns `self` unchanged.
+        (As with [`lineax.is_hermitian`][], only the tag is checked, not the actual
+        values of the operator.)
+        """
+        if is_hermitian(self):
+            return self
+        return conj(self).transpose()
+
     def __add__(self, other) -> "AbstractLinearOperator":
         # Local imports to avoid a circular dependency: `binary`/`wrapper` import
         # `base`, so the operators built here are imported lazily at call time.

@@ -32,7 +32,6 @@ from ._custom_types import sentinel
 from ._misc import inexact_asarray, strip_weak_dtype
 from ._operator import (
     AbstractLinearOperator,
-    conj,
     FunctionLinearOperator,
     IdentityLinearOperator,
     is_diagonal,
@@ -209,11 +208,10 @@ def _linear_solve_jvp(primals, tangents):
         assume_independent_rows = solver.assume_full_rank() and rows <= columns
         assume_independent_columns = solver.assume_full_rank() and columns <= rows
         if not assume_independent_rows or not assume_independent_columns:
-            operator_conj_transpose = conj(operator).transpose()
-            t_operator_conj_transpose = conj(t_operator).transpose()
-            state_conj, options_conj = solver.conj(state, options)
-            state_conj_transpose, options_conj_transpose = solver.transpose(
-                state_conj, options_conj
+            operator_conj_transpose = operator.H
+            t_operator_conj_transpose = t_operator.H
+            state_conj_transpose, options_conj_transpose = solver.conj_transpose(
+                state, options
             )
         if not assume_independent_rows:
             lst_sqr_diff = (vector**ω - operator.mv(solution) ** ω).ω
@@ -457,6 +455,44 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         - The options for the conjugated operator.
         """
 
+    def conj_transpose(
+        self, state: _SolverState, options: dict[str, Any]
+    ) -> tuple[_SolverState, dict[str, Any]]:
+        """Conjugate-transpose the result of [`lineax.AbstractLinearSolver.init`][].
+
+        That is, it should be the case that
+        ```python
+        state_h, _ = solver.conj_transpose(solver.init(operator, options), options)
+        state_h2 = solver.init(operator.H, options)
+        ```
+        must be identical to each other.
+
+        It is common (in particular when differentiating through a linear solve) to
+        need to solve against the conjugate transpose `Aᴴ`. This method makes it
+        possible to obtain the corresponding state without re-running `init`.
+
+        The default implementation composes [`lineax.AbstractLinearSolver.conj`][] and
+        [`lineax.AbstractLinearSolver.transpose`][]. Self-adjoint solvers (e.g.
+        [`lineax.Cholesky`][], [`lineax.HEVD`][]) override it as a no-op, since their
+        operators satisfy `Aᴴ = A`. Note that this is distinct from
+        [`lineax.AbstractLinearSolver.transpose`][], which such solvers must *not*
+        no-op (for complex operators `Aᵀ = conj(A) ≠ A`).
+
+        **Arguments:**
+
+        - `state`: as returned from `solver.init`.
+        - `options`: any extra options that were passed to `solver.init`.
+
+        **Returns:**
+
+        A 2-tuple of:
+
+        - The state of the conjugate-transposed operator.
+        - The options for the conjugate-transposed operator.
+        """
+        state, options = self.conj(state, options)
+        return self.transpose(state, options)
+
     @abc.abstractmethod
     def assume_full_rank(self) -> bool:
         """Does this solver assume that all operators are full rank?
@@ -658,6 +694,14 @@ class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
         conj_state, conj_options = solver.conj(state, options)
         conj_state = (token, conj_state)
         return conj_state, conj_options
+
+    def conj_transpose(self, state: _AutoLinearSolverState, options: dict[str, Any]):
+        # Delegate to the selected solver so its (possibly no-op) override applies.
+        token, state = state
+        solver = _lookup(token)
+        ct_state, ct_options = solver.conj_transpose(state, options)
+        ct_state = (token, ct_state)
+        return ct_state, ct_options
 
     def assume_full_rank(self):
         return self.well_posed is not False

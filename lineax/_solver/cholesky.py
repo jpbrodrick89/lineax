@@ -91,6 +91,14 @@ class Cholesky(AbstractLinearSolver[_CholeskyState]):
         factor, is_nsd = state
         return (factor.conj(), is_nsd), options
 
+    def conj_transpose(
+        self, state: _CholeskyState, options: dict[str, Any]
+    ) -> tuple[_CholeskyState, dict[str, Any]]:
+        # The operator is self-adjoint (PSD/NSD => Hermitian), so `Aᴴ = A` and the
+        # adjoint state is unchanged. (Note `transpose` above must *not* no-op: for
+        # a complex operator `Aᵀ = conj(A) != A`.)
+        return state, options
+
     def assume_full_rank(self):
         return True
 

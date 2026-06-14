@@ -220,3 +220,63 @@ def test_hermitian_preserved_under_addition(getkey):
     a = lx.MatrixLinearOperator(_hermitian(getkey, 3, jnp.complex128), lx.hermitian_tag)
     b = lx.MatrixLinearOperator(_hermitian(getkey, 3, jnp.complex128), lx.hermitian_tag)
     assert lx.is_hermitian(a + b)
+
+
+# --- conjugate-transpose (`.H`) property and solver adjoint state ---
+
+
+def test_H_property_hermitian_is_noop(getkey):
+    herm = _hermitian(getkey, 3, jnp.complex128)
+    op = lx.MatrixLinearOperator(herm, lx.hermitian_tag)
+    assert op.H is op
+    # Real-symmetric is also Hermitian -> no-op.
+    sym = _hermitian(getkey, 3, jnp.float64)
+    sop = lx.MatrixLinearOperator(sym, lx.symmetric_tag)
+    assert sop.H is sop
+
+
+def test_H_property_general_is_conj_transpose(getkey):
+    matrix = jr.normal(getkey(), (4, 3), dtype=jnp.complex128)
+    op = lx.MatrixLinearOperator(matrix)
+    assert op.H is not op
+    assert tree_allclose(op.H.as_matrix(), matrix.conj().T)
+    # `.H` differs from `.T` for complex operators.
+    assert tree_allclose(op.T.as_matrix(), matrix.T)
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_self_adjoint_solver_conj_transpose_is_noop(getkey, dtype):
+    # HEVD/Cholesky operate on Hermitian operators (`Aᴴ = A`), so `conj_transpose`
+    # leaves the state unchanged and still solves the original system.
+    herm = _hermitian(getkey, 4, dtype)
+    psd = herm @ herm.conj().T
+    b = jr.normal(getkey(), (4,), dtype=dtype)
+    psd_op = lx.MatrixLinearOperator(psd, lx.positive_semidefinite_tag)
+    for matrix, op, solver in [
+        (herm, lx.MatrixLinearOperator(herm, lx.hermitian_tag), lx.HEVD()),
+        (psd, psd_op, lx.Cholesky()),
+    ]:
+        state = solver.init(op, {})
+        ct_state, ct_options = solver.conj_transpose(state, {})
+        # No-op: arrays unchanged.
+        assert tree_allclose(
+            eqx.filter(ct_state, eqx.is_array), eqx.filter(state, eqx.is_array)
+        )
+        # And the (trivial) adjoint solve `Aᴴ x = A x = b` is correct.
+        x, _, _ = solver.compute(ct_state, b, ct_options)
+        assert tree_allclose(x, jnp.linalg.solve(matrix, b), atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_default_conj_transpose_matches_manual_composition(getkey, dtype):
+    # Solvers that don't override `conj_transpose` (e.g. LU) get the default, which
+    # composes `conj` then `transpose` -- exactly the inline computation the JVP rule
+    # used previously. Check the refactor preserves that state byte-for-byte.
+    matrix = jr.normal(getkey(), (4, 4), dtype=dtype)
+    solver = lx.LU()
+    state = solver.init(lx.MatrixLinearOperator(matrix), {})
+    ct_state, _ = solver.conj_transpose(state, {})
+    manual_state, _ = solver.transpose(*solver.conj(state, {}))
+    assert tree_allclose(
+        eqx.filter(ct_state, eqx.is_array), eqx.filter(manual_state, eqx.is_array)
+    )
