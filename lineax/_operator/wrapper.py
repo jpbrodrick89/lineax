@@ -40,6 +40,7 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
+    _has_real_dtype,
     AbstractLinearOperator,
     as_frozenset,
     conj,
@@ -514,7 +515,6 @@ def _(operator):
 
 for check, tag in (
     (is_symmetric, symmetric_tag),
-    (is_hermitian, hermitian_tag),
     (is_diagonal, diagonal_tag),
     (has_unit_diagonal, unit_diagonal_tag),
     (is_lower_triangular, lower_triangular_tag),
@@ -527,6 +527,26 @@ for check, tag in (
     @check.register(TaggedLinearOperator)
     def _(operator, check=check, tag=tag):
         return (tag in operator.tags) or check(operator.operator)
+
+
+# `is_hermitian` is special-cased rather than handled by the loop above: a tag other
+# than `hermitian_tag` can still imply Hermitian-ness. PSD/NSD operators are Hermitian
+# (real or complex), and real symmetric/diagonal operators are Hermitian too. This
+# mirrors the cross-implications encoded for the core operators.
+@is_hermitian.register(TaggedLinearOperator)
+def _(operator):
+    tags = operator.tags
+    if is_hermitian(operator.operator):
+        return True
+    if (
+        hermitian_tag in tags
+        or positive_semidefinite_tag in tags
+        or negative_semidefinite_tag in tags
+    ):
+        return True
+    if symmetric_tag in tags or diagonal_tag in tags:
+        return _has_real_dtype(operator)
+    return False
 
 
 @max_rank.register(TaggedLinearOperator)
