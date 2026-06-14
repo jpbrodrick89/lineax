@@ -423,9 +423,6 @@ class LSMR(AbstractLinearSolver[_LSMRState]):
         conj_options = {}
         return conj(operator), conj_options
 
-    def assume_hermitian(self):
-        return False
-
     def assume_full_rank(self):
         return False
 

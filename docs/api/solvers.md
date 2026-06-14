@@ -11,8 +11,6 @@ If you're not sure what to use, then pick [`lineax.AutoLinearSolver`][] and it w
                 - compute
                 - transpose
                 - conj
-                - conj_transpose
-                - assume_hermitian
                 - assume_full_rank
 
 ::: lineax.AutoLinearSolver

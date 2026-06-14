@@ -114,9 +114,6 @@ class QR(AbstractLinearSolver):
         conj_options = {}
         return conj_state, conj_options
 
-    def assume_hermitian(self):
-        return False
-
     def assume_full_rank(self):
         return True
 

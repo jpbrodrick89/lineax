@@ -210,9 +210,16 @@ def _linear_solve_jvp(primals, tangents):
         if not assume_independent_rows or not assume_independent_columns:
             operator_conj_transpose = operator.H
             t_operator_conj_transpose = t_operator.H
-            state_conj_transpose, options_conj_transpose = solver.conj_transpose(
-                state, options
-            )
+            if is_hermitian(operator):
+                # `Aᴴ = A`, so `init(Aᴴ) == init(A)`: the existing state already serves
+                # as the adjoint state. This holds for any solver, so the fast path is
+                # keyed on the operator rather than on the solver.
+                state_conj_transpose, options_conj_transpose = state, options
+            else:
+                state_conj, options_conj = solver.conj(state, options)
+                state_conj_transpose, options_conj_transpose = solver.transpose(
+                    state_conj, options_conj
+                )
         if not assume_independent_rows:
             lst_sqr_diff = (vector**ω - operator.mv(solution) ** ω).ω
             tmp = t_operator_conj_transpose.mv(lst_sqr_diff)  # pyright: ignore
@@ -455,67 +462,6 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         - The options for the conjugated operator.
         """
 
-    def conj_transpose(
-        self, state: _SolverState, options: dict[str, Any]
-    ) -> tuple[_SolverState, dict[str, Any]]:
-        """Conjugate-transpose the result of [`lineax.AbstractLinearSolver.init`][].
-
-        That is, it should be the case that
-        ```python
-        state_h, _ = solver.conj_transpose(solver.init(operator, options), options)
-        state_h2 = solver.init(operator.H, options)
-        ```
-        must be identical to each other.
-
-        It is common (in particular when differentiating through a linear solve) to
-        need to solve against the conjugate transpose `Aᴴ`. This method makes it
-        possible to obtain the corresponding state without re-running `init`.
-
-        For a self-adjoint solver (one whose operators satisfy `Aᴴ = A`, as flagged
-        by [`lineax.AbstractLinearSolver.assume_hermitian`][]) this is a no-op.
-        Otherwise it composes [`lineax.AbstractLinearSolver.conj`][] and
-        [`lineax.AbstractLinearSolver.transpose`][]. Note this is distinct from
-        [`lineax.AbstractLinearSolver.transpose`][], which a self-adjoint solver must
-        *not* no-op (for complex operators `Aᵀ = conj(A) ≠ A`).
-
-        This method is final; customise it via
-        [`lineax.AbstractLinearSolver.assume_hermitian`][] instead.
-
-        **Arguments:**
-
-        - `state`: as returned from `solver.init`.
-        - `options`: any extra options that were passed to `solver.init`.
-
-        **Returns:**
-
-        A 2-tuple of:
-
-        - The state of the conjugate-transposed operator.
-        - The options for the conjugate-transposed operator.
-        """
-        if self.assume_hermitian():
-            return state, options
-        state, options = self.conj(state, options)
-        return self.transpose(state, options)
-
-    @abc.abstractmethod
-    def assume_hermitian(self) -> bool:
-        """Does this solver assume that all operators are Hermitian (self-adjoint)?
-
-        When `True`, [`lineax.AbstractLinearSolver.conj_transpose`][] is a no-op, since
-        `Aᴴ = A`. This is the case for e.g. [`lineax.Cholesky`][] and
-        [`lineax.HEVD`][]. In a custom linear solver it is always safe to return
-        `False` (the conjugate transpose is then formed explicitly).
-
-        **Arguments:**
-
-        Nothing.
-
-        **Returns:**
-
-        Either `True` or `False`.
-        """
-
     @abc.abstractmethod
     def assume_full_rank(self) -> bool:
         """Does this solver assume that all operators are full rank?
@@ -717,13 +663,6 @@ class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
         conj_state, conj_options = solver.conj(state, options)
         conj_state = (token, conj_state)
         return conj_state, conj_options
-
-    def assume_hermitian(self):
-        # The selected solver is chosen at runtime (the token lives in the state), so
-        # we cannot know it here. Returning False is always safe: the final
-        # `conj_transpose` then forms the adjoint state explicitly via the (delegating)
-        # `conj` and `transpose` methods.
-        return False
 
     def assume_full_rank(self):
         return self.well_posed is not False

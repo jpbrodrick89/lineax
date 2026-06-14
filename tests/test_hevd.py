@@ -245,38 +245,21 @@ def test_H_property_general_is_conj_transpose(getkey):
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
-def test_self_adjoint_solver_conj_transpose_is_noop(getkey, dtype):
-    # HEVD/Cholesky operate on Hermitian operators (`Aᴴ = A`), so `conj_transpose`
-    # leaves the state unchanged and still solves the original system.
+@pytest.mark.parametrize("solver_cls", (lx.HEVD, lx.Cholesky, lx.LU))
+def test_hermitian_adjoint_state_reuses_init(getkey, dtype, solver_cls):
+    # The linear-solve JVP's fast path relies on: for a Hermitian operator (`Aᴴ = A`),
+    # `init(A.H)` equals `init(A)`, so the original state can be reused as the adjoint
+    # state -- for *any* solver, not just self-adjoint ones. Check that holds.
     herm = _hermitian(getkey, 4, dtype)
-    psd = herm @ herm.conj().T
-    b = jr.normal(getkey(), (4,), dtype=dtype)
-    psd_op = lx.MatrixLinearOperator(psd, lx.positive_semidefinite_tag)
-    for matrix, op, solver in [
-        (herm, lx.MatrixLinearOperator(herm, lx.hermitian_tag), lx.HEVD()),
-        (psd, psd_op, lx.Cholesky()),
-    ]:
-        state = solver.init(op, {})
-        ct_state, ct_options = solver.conj_transpose(state, {})
-        # No-op: arrays unchanged.
-        assert tree_allclose(
-            eqx.filter(ct_state, eqx.is_array), eqx.filter(state, eqx.is_array)
-        )
-        # And the (trivial) adjoint solve `Aᴴ x = A x = b` is correct.
-        x, _, _ = solver.compute(ct_state, b, ct_options)
-        assert tree_allclose(x, jnp.linalg.solve(matrix, b), atol=tol, rtol=tol)
-
-
-@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
-def test_default_conj_transpose_matches_manual_composition(getkey, dtype):
-    # Solvers that don't override `conj_transpose` (e.g. LU) get the default, which
-    # composes `conj` then `transpose` -- exactly the inline computation the JVP rule
-    # used previously. Check the refactor preserves that state byte-for-byte.
-    matrix = jr.normal(getkey(), (4, 4), dtype=dtype)
-    solver = lx.LU()
-    state = solver.init(lx.MatrixLinearOperator(matrix), {})
-    ct_state, _ = solver.conj_transpose(state, {})
-    manual_state, _ = solver.transpose(*solver.conj(state, {}))
+    if solver_cls is lx.Cholesky:
+        herm = herm @ herm.conj().T  # PSD, still Hermitian
+        op = lx.MatrixLinearOperator(herm, lx.positive_semidefinite_tag)
+    else:
+        op = lx.MatrixLinearOperator(herm, lx.hermitian_tag)
+    solver = solver_cls()
+    assert op.H is op  # operator-level no-op
+    state = solver.init(op, {})
+    adjoint_state = solver.init(op.H, {})
     assert tree_allclose(
-        eqx.filter(ct_state, eqx.is_array), eqx.filter(manual_state, eqx.is_array)
+        eqx.filter(state, eqx.is_array), eqx.filter(adjoint_state, eqx.is_array)
     )

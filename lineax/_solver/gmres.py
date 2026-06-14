@@ -426,9 +426,6 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         operator = state
         return conj(operator), conj_options
 
-    def assume_hermitian(self):
-        return False
-
     def assume_full_rank(self):
         return True
 

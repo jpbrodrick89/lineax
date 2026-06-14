@@ -246,9 +246,6 @@ class CG(AbstractLinearSolver[_CGState]):
         conj_state = conj(psd_op), is_nsd
         return conj_state, conj_options
 
-    def assume_hermitian(self):
-        return False
-
     def assume_full_rank(self):
         return True
 
