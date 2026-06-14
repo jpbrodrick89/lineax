@@ -224,6 +224,9 @@ def test_solver_init_not_differentiated(getkey):
         def conj(self, state, options):
             return self.solver.conj(state, options)
 
+        def assume_hermitian(self):
+            return self.solver.assume_hermitian()
+
         def assume_full_rank(self):
             return self.solver.assume_full_rank()
 

@@ -101,6 +101,9 @@ class Diagonal(AbstractLinearSolver[_DiagonalState]):
         conj_state = conj_diag, packed_structures
         return conj_state, conj_options
 
+    def assume_hermitian(self):
+        return False
+
     def assume_full_rank(self):
         return self.well_posed
 

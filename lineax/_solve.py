@@ -471,12 +471,15 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         need to solve against the conjugate transpose `Aᴴ`. This method makes it
         possible to obtain the corresponding state without re-running `init`.
 
-        The default implementation composes [`lineax.AbstractLinearSolver.conj`][] and
-        [`lineax.AbstractLinearSolver.transpose`][]. Self-adjoint solvers (e.g.
-        [`lineax.Cholesky`][], [`lineax.HEVD`][]) override it as a no-op, since their
-        operators satisfy `Aᴴ = A`. Note that this is distinct from
-        [`lineax.AbstractLinearSolver.transpose`][], which such solvers must *not*
-        no-op (for complex operators `Aᵀ = conj(A) ≠ A`).
+        For a self-adjoint solver (one whose operators satisfy `Aᴴ = A`, as flagged
+        by [`lineax.AbstractLinearSolver.assume_hermitian`][]) this is a no-op.
+        Otherwise it composes [`lineax.AbstractLinearSolver.conj`][] and
+        [`lineax.AbstractLinearSolver.transpose`][]. Note this is distinct from
+        [`lineax.AbstractLinearSolver.transpose`][], which a self-adjoint solver must
+        *not* no-op (for complex operators `Aᵀ = conj(A) ≠ A`).
+
+        This method is final; customise it via
+        [`lineax.AbstractLinearSolver.assume_hermitian`][] instead.
 
         **Arguments:**
 
@@ -490,8 +493,28 @@ class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
         - The state of the conjugate-transposed operator.
         - The options for the conjugate-transposed operator.
         """
+        if self.assume_hermitian():
+            return state, options
         state, options = self.conj(state, options)
         return self.transpose(state, options)
+
+    @abc.abstractmethod
+    def assume_hermitian(self) -> bool:
+        """Does this solver assume that all operators are Hermitian (self-adjoint)?
+
+        When `True`, [`lineax.AbstractLinearSolver.conj_transpose`][] is a no-op, since
+        `Aᴴ = A`. This is the case for e.g. [`lineax.Cholesky`][] and
+        [`lineax.HEVD`][]. In a custom linear solver it is always safe to return
+        `False` (the conjugate transpose is then formed explicitly).
+
+        **Arguments:**
+
+        Nothing.
+
+        **Returns:**
+
+        Either `True` or `False`.
+        """
 
     @abc.abstractmethod
     def assume_full_rank(self) -> bool:
@@ -695,13 +718,12 @@ class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
         conj_state = (token, conj_state)
         return conj_state, conj_options
 
-    def conj_transpose(self, state: _AutoLinearSolverState, options: dict[str, Any]):
-        # Delegate to the selected solver so its (possibly no-op) override applies.
-        token, state = state
-        solver = _lookup(token)
-        ct_state, ct_options = solver.conj_transpose(state, options)
-        ct_state = (token, ct_state)
-        return ct_state, ct_options
+    def assume_hermitian(self):
+        # The selected solver is chosen at runtime (the token lives in the state), so
+        # we cannot know it here. Returning False is always safe: the final
+        # `conj_transpose` then forms the adjoint state explicitly via the (delegating)
+        # `conj` and `transpose` methods.
+        return False
 
     def assume_full_rank(self):
         return self.well_posed is not False

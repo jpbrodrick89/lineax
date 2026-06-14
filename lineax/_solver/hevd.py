@@ -147,11 +147,11 @@ class HEVD(AbstractLinearSolver[_HEVDState]):
         conj_options = {}
         return conj_state, conj_options
 
-    def conj_transpose(self, state: _HEVDState, options: dict[str, Any]):
-        # The operator is Hermitian, so `Aᴴ = A` and the adjoint state is unchanged.
-        # (Note `transpose` above must *not* no-op: for a complex operator
-        # `Aᵀ = conj(A) != A`.)
-        return state, options
+    def assume_hermitian(self):
+        # The operator is Hermitian, so `conj_transpose` is a no-op (`Aᴴ = A`). Note
+        # that `transpose` must still *not* no-op: for a complex operator
+        # `Aᵀ = conj(A)`.
+        return True
 
     def assume_full_rank(self):
         return False

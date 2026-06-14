@@ -177,6 +177,9 @@ class Normal(
         )
         return state_conj, options
 
+    def assume_hermitian(self):
+        return False
+
     def assume_full_rank(self):
         return self.inner_solver.assume_full_rank()
 

@@ -91,13 +91,10 @@ class Cholesky(AbstractLinearSolver[_CholeskyState]):
         factor, is_nsd = state
         return (factor.conj(), is_nsd), options
 
-    def conj_transpose(
-        self, state: _CholeskyState, options: dict[str, Any]
-    ) -> tuple[_CholeskyState, dict[str, Any]]:
-        # The operator is self-adjoint (PSD/NSD => Hermitian), so `Aᴴ = A` and the
-        # adjoint state is unchanged. (Note `transpose` above must *not* no-op: for
-        # a complex operator `Aᵀ = conj(A) != A`.)
-        return state, options
+    def assume_hermitian(self):
+        # PSD/NSD => Hermitian, so `conj_transpose` is a no-op (`Aᴴ = A`). Note that
+        # `transpose` must still *not* no-op: for a complex operator `Aᵀ = conj(A)`.
+        return True
 
     def assume_full_rank(self):
         return True
