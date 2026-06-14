@@ -28,6 +28,7 @@ from jaxtyping import (
 
 from .._tags import (
     diagonal_tag,
+    hermitian_tag,
     lower_triangular_tag,
     MaxRankTag,
     negative_semidefinite_tag,
@@ -45,6 +46,7 @@ from .base import (
     diagonal,
     has_unit_diagonal,
     is_diagonal,
+    is_hermitian,
     is_lower_triangular,
     is_negative_semidefinite,
     is_positive_semidefinite,
@@ -340,6 +342,7 @@ def _(operator):
 
 for check in (
     is_symmetric,
+    is_hermitian,
     is_diagonal,
     has_unit_diagonal,
     is_lower_triangular,
@@ -369,6 +372,33 @@ for check in (
     @check.register(DivLinearOperator)
     def _(operator, check=check):
         return check(operator.operator)
+
+
+def _scalar_is_real(scalar) -> bool:
+    """Whether a scalar is statically known to be real-valued.
+
+    Conservative: returns `False` for JAX tracers (unknown at trace time) and for any
+    complex value.
+    """
+    if isinstance(scalar, (bool, int, float)):
+        return True
+    if isinstance(scalar, (np.ndarray, np.generic)):
+        return not np.iscomplexobj(scalar)
+    return False
+
+
+# Negation (scaling by the real scalar -1) preserves Hermitian-ness. General scaling
+# does too, but only for a real scalar: a complex scalar `c` turns `A = A^H` into
+# `(cA)^H = conj(c) A^H = conj(c) A != cA`.
+@is_hermitian.register(NegLinearOperator)
+def _(operator):
+    return is_hermitian(operator.operator)
+
+
+@is_hermitian.register(MulLinearOperator)
+@is_hermitian.register(DivLinearOperator)
+def _(operator):
+    return _scalar_is_real(operator.scalar) and is_hermitian(operator.operator)
 
 
 # has_unit_diagonal is NOT preserved by negation
@@ -484,6 +514,7 @@ def _(operator):
 
 for check, tag in (
     (is_symmetric, symmetric_tag),
+    (is_hermitian, hermitian_tag),
     (is_diagonal, diagonal_tag),
     (has_unit_diagonal, unit_diagonal_tag),
     (is_lower_triangular, lower_triangular_tag),

@@ -38,6 +38,7 @@ from .._misc import (
 )
 from .._tags import (
     diagonal_tag,
+    hermitian_tag,
     lower_triangular_tag,
     negative_semidefinite_tag,
     positive_semidefinite_tag,
@@ -48,6 +49,7 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
+    _has_real_dtype,
     AbstractLinearOperator,
     as_frozenset,
     conj,
@@ -56,6 +58,7 @@ from .base import (
     has_unit_diagonal,
     inexact_structure,
     is_diagonal,
+    is_hermitian,
     is_lower_triangular,
     is_negative_semidefinite,
     is_positive_semidefinite,
@@ -724,20 +727,6 @@ def _(operator):
 # checks
 
 
-def _has_real_dtype(operator) -> bool:
-    """Check if all dtypes in an operator's structure are real (not complex)."""
-    leaves = jtu.tree_leaves((operator.in_structure(), operator.out_structure()))
-    dtype = jnp.result_type(*leaves)
-    if jnp.issubdtype(dtype, jnp.complexfloating):
-        return False
-    elif jnp.issubdtype(dtype, jnp.floating):
-        return True
-    else:
-        assert False, (
-            "Only `jnp.floating` and `jnp.complexfloating` dtypes are understood."
-        )
-
-
 @is_symmetric.register(MatrixLinearOperator)
 @is_symmetric.register(PyTreeLinearOperator)
 @is_symmetric.register(JacobianLinearOperator)
@@ -746,11 +735,33 @@ def _(operator):
     # Symmetric (A = A^T) if explicitly tagged symmetric or diagonal
     if symmetric_tag in operator.tags or diagonal_tag in operator.tags:
         return True
-    # PSD/NSD implies symmetric only for real dtypes; for complex, it's Hermitian
+    # PSD/NSD/Hermitian imply A = A^T only for real dtypes; for complex they instead
+    # imply A = A^H (i.e. Hermitian).
     if (
         positive_semidefinite_tag in operator.tags
         or negative_semidefinite_tag in operator.tags
+        or hermitian_tag in operator.tags
     ):
+        return _has_real_dtype(operator)
+    return False
+
+
+@is_hermitian.register(MatrixLinearOperator)
+@is_hermitian.register(PyTreeLinearOperator)
+@is_hermitian.register(JacobianLinearOperator)
+@is_hermitian.register(FunctionLinearOperator)
+def _(operator):
+    # Hermitian (A = A^H) if explicitly tagged Hermitian, or PSD/NSD (which are
+    # Hermitian by definition for both real and complex dtypes).
+    if (
+        hermitian_tag in operator.tags
+        or positive_semidefinite_tag in operator.tags
+        or negative_semidefinite_tag in operator.tags
+    ):
+        return True
+    # Symmetric (A = A^T) or diagonal operators are Hermitian only for real dtypes;
+    # for complex, A = A^T does not imply A = A^H.
+    if symmetric_tag in operator.tags or diagonal_tag in operator.tags:
         return _has_real_dtype(operator)
     return False
 

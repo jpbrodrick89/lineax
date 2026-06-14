@@ -49,6 +49,8 @@ def _construct_matrix_impl(
             matrix = jnp.diag(jnp.diag(matrix))
         if has_tag(tags, lx.symmetric_tag):
             matrix = matrix + matrix.T
+        if has_tag(tags, lx.hermitian_tag):
+            matrix = matrix + matrix.conj().T
         if has_tag(tags, lx.lower_triangular_tag):
             matrix = jnp.tril(matrix)
         if has_tag(tags, lx.upper_triangular_tag):
@@ -84,7 +86,10 @@ def construct_matrix(getkey, solver, tags, num=1, *, size=3, dtype=jnp.float64):
 
 
 def construct_singular_matrix(getkey, solver, tags, num=1, dtype=jnp.float64):
-    if isinstance(solver, (lx.Diagonal, lx.CG, lx.BiCGStab, lx.GMRES)):
+    if isinstance(solver, (lx.Diagonal, lx.CG, lx.BiCGStab, lx.GMRES, lx.HEVD)):
+        # `trim_row`/`trim_col` produce non-square matrices, which are incompatible
+        # with the (square) structure these solvers require. Use `zero` instead,
+        # which keeps the matrix square and (for PSD/NSD/Hermitian tags) Hermitian.
         singular_method = "zero"
     else:
         # Use `getkey()` rather than the stdlib `random.choice` for reproducibility
@@ -133,6 +138,13 @@ solvers_tags_pseudoinverse = [
     (lx.Cholesky(), lx.positive_semidefinite_tag, False),
     (lx.Cholesky(), lx.negative_semidefinite_tag, False),
     (lx.Normal(lx.Cholesky()), (), False),
+    (lx.HEVD(), lx.positive_semidefinite_tag, True),
+    (lx.HEVD(), lx.negative_semidefinite_tag, True),
+    # Indefinite-Hermitian coverage (well-posed only): the `zero` singular
+    # construction does not yield a genuinely rank-deficient matrix for a bare
+    # `hermitian_tag`, so the singular pseudoinverse path is covered by the
+    # (genuinely rank-deficient) PSD/NSD entries above instead.
+    (lx.HEVD(), lx.hermitian_tag, False),
 ]
 solvers_tags = [(a, b) for a, b, _ in solvers_tags_pseudoinverse]
 solvers = [a for a, _, _ in solvers_tags_pseudoinverse]

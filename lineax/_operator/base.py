@@ -87,6 +87,7 @@ class AbstractLinearOperator(eqx.Module):
     def __check_init__(self):
         if (
             is_symmetric(self)
+            or is_hermitian(self)
             or is_positive_semidefinite(self)
             or is_negative_semidefinite(self)
         ):
@@ -399,9 +400,26 @@ def tridiagonal(
     _default_not_implemented("tridiagonal", operator)
 
 
+def _has_real_dtype(operator) -> bool:
+    """Check if all dtypes in an operator's structure are real (not complex)."""
+    leaves = jtu.tree_leaves((operator.in_structure(), operator.out_structure()))
+    dtype = jnp.result_type(*leaves)
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        return False
+    elif jnp.issubdtype(dtype, jnp.floating):
+        return True
+    else:
+        assert False, (
+            "Only `jnp.floating` and `jnp.complexfloating` dtypes are understood."
+        )
+
+
 @ft.singledispatch
 def is_symmetric(operator: AbstractLinearOperator) -> bool:
     """Returns whether an operator is marked as symmetric.
+
+    As a matrix, this means `A = A^T` (the ordinary, non-conjugated transpose). For
+    real operators this coincides with [`lineax.is_hermitian`][].
 
     See [the documentation on linear operator tags](../api/tags.md) for more
     information.
@@ -415,6 +433,27 @@ def is_symmetric(operator: AbstractLinearOperator) -> bool:
     Either `True` or `False.`
     """
     _default_not_implemented("is_symmetric", operator)
+
+
+@ft.singledispatch
+def is_hermitian(operator: AbstractLinearOperator) -> bool:
+    """Returns whether an operator is marked as Hermitian (self-adjoint).
+
+    As a matrix, this means `A = A^H` (the conjugate transpose). For real operators
+    this coincides with [`lineax.is_symmetric`][].
+
+    See [the documentation on linear operator tags](../api/tags.md) for more
+    information.
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    Either `True` or `False.`
+    """
+    _default_not_implemented("is_hermitian", operator)
 
 
 @ft.singledispatch

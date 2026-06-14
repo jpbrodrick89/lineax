@@ -36,6 +36,7 @@ from .._misc import (
     strip_weak_dtype,
 )
 from .base import (
+    _has_real_dtype,
     AbstractLinearOperator,
     conj,
     diagonal,
@@ -43,6 +44,7 @@ from .base import (
     has_unit_diagonal,
     inexact_structure,
     is_diagonal,
+    is_hermitian,
     is_lower_triangular,
     is_negative_semidefinite,
     is_positive_semidefinite,
@@ -292,16 +294,25 @@ def _(operator):
 
 
 @is_symmetric.register(IdentityLinearOperator)
+@is_hermitian.register(IdentityLinearOperator)
 def _(operator):
     return eqx.tree_equal(operator.in_structure(), operator.out_structure()) is True
 
 
 @is_symmetric.register(DiagonalLinearOperator)
 def _(operator):
+    # A diagonal matrix always equals its (non-conjugated) transpose.
     return True
 
 
+@is_hermitian.register(DiagonalLinearOperator)
+def _(operator):
+    # A diagonal matrix is Hermitian iff its diagonal is real-valued.
+    return _has_real_dtype(operator)
+
+
 @is_symmetric.register(TridiagonalLinearOperator)
+@is_hermitian.register(TridiagonalLinearOperator)
 def _(operator):
     return False
 
