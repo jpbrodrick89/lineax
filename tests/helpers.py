@@ -150,6 +150,7 @@ solvers_tags_pseudoinverse = [
     (lx.HEVD(), lx.positive_semidefinite_tag, True),
     (lx.HEVD(), lx.negative_semidefinite_tag, True),
     (lx.HEVD(), lx.hermitian_tag, True),
+    (lx.Normal(lx.HEVD()), (), True),
 ]
 solvers_tags = [(a, b) for a, b, _ in solvers_tags_pseudoinverse]
 solvers = [a for a, _, _ in solvers_tags_pseudoinverse]
