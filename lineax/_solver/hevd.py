@@ -20,7 +20,13 @@ import jax.numpy as jnp
 from jaxtyping import Array, PyTree
 
 from .._misc import resolve_rcond
-from .._operator import AbstractLinearOperator, is_hermitian, max_rank
+from .._operator import (
+    AbstractLinearOperator,
+    is_hermitian,
+    is_negative_semidefinite,
+    is_positive_semidefinite,
+    max_rank,
+)
 from .._solution import RESULTS
 from .._solve import AbstractLinearSolver
 from .misc import (
@@ -61,34 +67,41 @@ class HEVD(AbstractLinearSolver[_HEVDState]):
             )
         w, v = jnp.linalg.eigh(operator.as_matrix())
         # `jnp.linalg.eigh` returns eigenvalues in ascending (signed) order. In the
-        # common case we leave them in that order: `compute` masks the small
-        # eigenvalues by magnitude and so does not care about the ordering.
+        # common (untruncated) case we keep that order: `compute` masks the small
+        # eigenvalues by magnitude and does not care about the ordering.
         r = max_rank(operator)
         if r < w.shape[0]:
             # The operator is declared to have rank at most `r`, so all but the `r`
             # largest-magnitude eigenvalues are mathematically zero. Statically drop
             # them to shrink the matmuls (and storage) in `compute`.
-            #
-            # Unlike `SVD`'s singular values -- already sorted descending, so
-            # truncation is a free slice -- eigenvalues are signed and ascending, so
-            # the small-magnitude ones sit in the *interior* of the spectrum.
-            # Selecting the `r` largest-magnitude therefore needs a reordering
-            # gather. We only pay for it when a rank tag is actually present, and it
-            # is O(n^2): dominated by the O(n^3) eigendecomposition above.
-            order = jnp.argsort(jnp.abs(w))[::-1]
-            w = w[order]
-            v = v[:, order]
-            # `compute` masks out `|w_i| <= rcond * max|w|`, so dropping the tail is
-            # lossless iff it all sits below that floor (using the same rcond).
-            # Otherwise the `max_rank` claim is false and truncating would change
-            # the solution. `w` is now sorted by descending magnitude, so testing
-            # the largest discarded value `|w[r]|` certifies the tail.
             m = v.shape[0]
-            # w.size > 0 since r < size
-            rcond = resolve_rcond(self.rcond, m, m, w.dtype) * jnp.abs(w[0])
+            rcond = resolve_rcond(self.rcond, m, m, w.dtype) * jnp.max(jnp.abs(w))
+            if is_positive_semidefinite(operator):
+                # All eigenvalues are >= 0, so in eigh's ascending order the `r`
+                # largest are a contiguous trailing slice -- no reordering gather
+                # needed (a slice is much cheaper, especially on accelerators).
+                w, v, dropped = w[m - r :], v[:, m - r :], w[: m - r]
+            elif is_negative_semidefinite(operator):
+                # All eigenvalues are <= 0, so the `r` largest in magnitude are a
+                # contiguous leading slice.
+                w, v, dropped = w[:r], v[:, :r], w[r:]
+            else:
+                # Indefinite: the small-magnitude eigenvalues sit in the *interior*
+                # of the spectrum (large values of both signs at either end), so a
+                # contiguous slice will not do. Reorder by descending magnitude (an
+                # O(n^2) gather, dominated by the O(n^3) eigendecomposition) and take
+                # the leading `r`.
+                order = jnp.argsort(jnp.abs(w))[::-1]
+                w, v = w[order], v[:, order]
+                w, v, dropped = w[:r], v[:, :r], w[r:]
+            # `compute` masks out `|w_i| <= rcond * max|w|`, so dropping these is
+            # lossless iff they all sit below that floor. Otherwise the `max_rank`
+            # claim is false (truncation would change the solution), so error out.
+            # Checking the largest discarded magnitude also catches a mistagged
+            # PSD/NSD operator whose true large eigenvalues sit on the dropped side.
             w = eqx.error_if(
                 w,
-                jnp.abs(w[r]) > rcond,
+                jnp.max(jnp.abs(dropped)) > rcond,
                 "lineax.HEVD: the operator was declared (via a `MaxRankTag`, or by "
                 f"composition rules) to have rank at most {r}, but it has an "
                 "eigenvalue above the rcond threshold beyond that rank. Truncating to "
@@ -97,8 +110,6 @@ class HEVD(AbstractLinearSolver[_HEVDState]):
                 "`rcond` if you intend a low-rank approximation, or set "
                 "`EQX_ON_ERROR=off` to skip this check.",
             )
-            w = w[:r]
-            v = v[:, :r]
         packed_structures = pack_structures(operator)
         return (w, v), packed_structures
 

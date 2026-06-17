@@ -297,11 +297,46 @@ def test_hevd_truncates_state_to_max_rank():
     assert jnp.allclose(x_plain, x_tagged)
 
 
-def test_hevd_raises_when_max_rank_too_small():
+# PSD (eigenvalues >= 0) and NSD (<= 0) operators have their near-zero eigenvalues at
+# a contiguous *end* of eigh's ascending order, so truncation is a slice rather than a
+# reorder. Indefinite operators need the reordering gather. Cover all three branches.
+@pytest.mark.parametrize(
+    "tag, eigvals",
+    (
+        (lx.hermitian_tag, [3.0, -2.0, 0.0, 0.0, 0.0]),  # indefinite -> reorder
+        (lx.positive_semidefinite_tag, [3.0, 2.0, 0.0, 0.0, 0.0]),  # PSD -> slice tail
+        (lx.negative_semidefinite_tag, [-3.0, -2.0, 0.0, 0.0, 0.0]),  # NSD -> head
+    ),
+)
+def test_hevd_truncation_branches(tag, eigvals):
+    matrix = _hermitian_with_spectrum(jax.random.PRNGKey(0), eigvals)
+    solver = lx.HEVD()
+    plain = lx.MatrixLinearOperator(matrix, tag)
+    tagged = lx.MatrixLinearOperator(matrix, (tag, lx.MaxRankTag(2)))
+
+    (w_t, v_t), _ = solver.init(tagged, {})
+    assert w_t.shape == (2,)
+    assert v_t.shape == (5, 2)
+
+    vector = jnp.arange(5.0) + 0.5
+    x_plain = lx.linear_solve(plain, vector, solver).value
+    x_tagged = lx.linear_solve(tagged, vector, solver).value
+    assert jnp.allclose(x_plain, x_tagged)
+
+
+@pytest.mark.parametrize(
+    "tag, eigvals",
+    (
+        (lx.hermitian_tag, [3.0, -2.0, 1.5, 0.0, 0.0]),
+        (lx.positive_semidefinite_tag, [3.0, 2.0, 1.5, 0.0, 0.0]),
+        (lx.negative_semidefinite_tag, [-3.0, -2.0, -1.5, 0.0, 0.0]),
+    ),
+)
+def test_hevd_raises_when_max_rank_too_small(tag, eigvals):
     # A genuinely rank-3 Hermitian matrix declared rank 2: truncation would discard an
     # eigenvalue above the rcond threshold, so the solve must raise.
-    matrix = _hermitian_with_spectrum(jax.random.PRNGKey(0), [3.0, -2.0, 1.5, 0.0, 0.0])
-    operator = lx.MatrixLinearOperator(matrix, (lx.hermitian_tag, lx.MaxRankTag(2)))
+    matrix = _hermitian_with_spectrum(jax.random.PRNGKey(0), eigvals)
+    operator = lx.MatrixLinearOperator(matrix, (tag, lx.MaxRankTag(2)))
     vector = jnp.arange(5.0) + 0.5
     with pytest.raises(eqx.EquinoxRuntimeError):
         lx.linear_solve(operator, vector, lx.HEVD())
