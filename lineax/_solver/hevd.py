@@ -28,7 +28,7 @@ from .._operator import (
     max_rank,
 )
 from .._solution import RESULTS
-from .._solve import AbstractLinearSolver
+from .base import AbstractLinearSolver
 from .misc import (
     pack_structures,
     PackedStructures,

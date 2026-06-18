@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import abc
 import functools as ft
-from typing import Any, Generic, TYPE_CHECKING, TypeAlias, TypeVar
+from types import NotImplementedType
+from typing import Any, TypeAlias
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 from equinox.internal import ω
 from jax._src.ad_util import stop_gradient_p
-from jaxtyping import Array, ArrayLike, PyTree
+from jaxtyping import ArrayLike, PyTree
 
 from ._custom_types import sentinel
 from ._misc import inexact_asarray, strip_weak_dtype
@@ -34,19 +34,23 @@ from ._operator import (
     AbstractLinearOperator,
     FunctionLinearOperator,
     IdentityLinearOperator,
-    is_diagonal,
     is_hermitian,
-    is_lower_triangular,
-    is_negative_semidefinite,
-    is_positive_semidefinite,
-    is_tridiagonal,
-    is_upper_triangular,
     linearise,
     max_rank,
     TaggedLinearOperator,
     TangentLinearOperator,
 )
 from ._solution import RESULTS, Solution
+from ._solver import (
+    AutoLinearSolver as AutoLinearSolver,
+    Cholesky,
+    HEVD,
+    Normal,
+    QR,
+    SVD,
+)
+from ._solver.base import AbstractLinearSolver as AbstractLinearSolver
+from ._solver.misc import pack_structures
 from ._tags import (
     invert_tags,
     positive_semidefinite_tag,
@@ -54,12 +58,11 @@ from ._tags import (
 )
 
 
-if TYPE_CHECKING:
-    from ._solver import HEVD, Normal, QR, SVD
-
-    # Solvers whose factorisation cheaply yields the gram (pseudo)inverse `(AᴴA)⁺`;
-    # see `_gram_partner`.
-    _HasGramPartner: TypeAlias = QR | SVD | HEVD | Normal
+# Solvers whose factorisation cheaply yields the gram (pseudo)inverse `(AᴴA)⁺`; see
+# `_gram_partner`. (The refactor that moved `AbstractLinearSolver` out of this module
+# removed the `_solve` <-> `_solver` import cycle, so this can be a real runtime alias
+# imported at module scope rather than a `TYPE_CHECKING`-only one.)
+_HasGramPartner: TypeAlias = QR | SVD | HEVD | Normal
 
 
 #
@@ -171,14 +174,13 @@ def _squared_rcond(rcond: float | None, n: int, m: int, dtype) -> float:
 
 
 def _gram_partner(
-    solver: "AbstractLinearSolver",
+    solver: _HasGramPartner,
     gram_operator: AbstractLinearOperator,
     state: Any,
-):
-    """If `solver`'s factorisation cheaply yields the gram (pseudo)inverse, return a
-    `(gram_solver, gram_state)` pair such that
-    `linear_solve_p(gram_operator, gram_state, v, gram_solver)` computes `(AᴴA)⁺ v`
-    (where `gram_operator` is `AᴴA`). Otherwise return `NotImplemented`.
+) -> tuple[AbstractLinearSolver, Any] | NotImplementedType:
+    """For a solver with a gram partner, return a `(gram_solver, gram_state)` pair such
+    that `linear_solve_p(gram_operator, gram_state, v, gram_solver)` computes
+    `(AᴴA)⁺ v` (where `gram_operator` is `AᴴA`). Otherwise return `NotImplemented`.
 
     Every non-well-posed solver has a "gram partner" -- a solver representing the
     (pseudo)inverse of the gram matrix `AᴴA`, obtainable from the existing
@@ -194,13 +196,7 @@ def _gram_partner(
     `linear_solve_p` -- rather than applying the factors directly -- keeps it correct
     under higher-order autodiff, since the gram solve then uses lineax's
     pseudoinverse-aware adjoint rather than differentiating through the factorisation.
-
-    Type-wise the solvers handled here are `_HasGramPartner`; the imports are deferred
-    because those modules import this one.
     """
-    from ._solver import Cholesky, HEVD, Normal, QR, SVD
-    from ._solver.misc import pack_structures
-
     if isinstance(solver, Normal):
         inner_state, tall, _, _ = state
         if not tall.value:
@@ -331,7 +327,10 @@ def _linear_solve_jvp(primals, tangents):
             gram_operator = TaggedLinearOperator(
                 operator.H @ operator, positive_semidefinite_tag
             )
-            gram_partner = _gram_partner(solver, gram_operator, state)
+            if isinstance(solver, _HasGramPartner):
+                gram_partner = _gram_partner(solver, gram_operator, state)
+            else:
+                gram_partner = NotImplemented
             if gram_partner is NotImplemented:
                 tmp, _, _ = eqxi.filter_primitive_bind(
                     linear_solve_p,
@@ -461,149 +460,6 @@ eqxi.register_impl_finalisation(linear_solve_p)
 #
 
 
-_SolverState = TypeVar("_SolverState")
-
-
-class AbstractLinearSolver(eqx.Module, Generic[_SolverState]):
-    """Abstract base class for all linear solvers."""
-
-    @abc.abstractmethod
-    def init(
-        self, operator: AbstractLinearOperator, options: dict[str, Any]
-    ) -> _SolverState:
-        """Do any initial computation on just the `operator`.
-
-        For example, an LU solver would compute the LU decomposition of the operator
-        (and this does not require knowing the vector yet).
-
-        It is common to need to solve the linear system `Ax=b` multiple times in
-        succession, with the same operator `A` and multiple vectors `b`. This method
-        improves efficiency by making it possible to re-use the computation performed
-        on just the operator.
-
-        !!! Example
-
-            ```python
-            operator = lx.MatrixLinearOperator(...)
-            vector1 = ...
-            vector2 = ...
-            solver = lx.LU()
-            state = solver.init(operator, options={})
-            solution1 = lx.linear_solve(operator, vector1, solver, state=state)
-            solution2 = lx.linear_solve(operator, vector2, solver, state=state)
-            ```
-
-        **Arguments:**
-
-        - `operator`: a linear operator.
-        - `options`: a dictionary of any extra options that the solver may wish to
-            accept.
-
-        **Returns:**
-
-        A PyTree of arbitrary Python objects.
-        """
-
-    @abc.abstractmethod
-    def compute(
-        self, state: _SolverState, vector: PyTree[Array], options: dict[str, Any]
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
-        """Solves a linear system.
-
-        **Arguments:**
-
-        - `state`: as returned from [`lineax.AbstractLinearSolver.init`][].
-        - `vector`: the vector to solve against.
-        - `options`: a dictionary of any extra options that the solver may wish to
-            accept. For example, [`lineax.CG`][] accepts a `preconditioner` option.
-
-        **Returns:**
-
-        A 3-tuple of:
-
-        - The solution to the linear system.
-        - An integer indicating the success or failure of the solve. This is an integer
-            which may be converted to a human-readable error message via
-            `lx.RESULTS[...]`.
-        - A dictionary of an extra statistics about the solve, e.g. the number of steps
-            taken.
-        """
-
-    @abc.abstractmethod
-    def transpose(
-        self, state: _SolverState, options: dict[str, Any]
-    ) -> tuple[_SolverState, dict[str, Any]]:
-        """Transposes the result of [`lineax.AbstractLinearSolver.init`][].
-
-        That is, it should be the case that
-        ```python
-        state_transpose, _ = solver.transpose(solver.init(operator, options), options)
-        state_transpose2 = solver.init(operator.T, options)
-        ```
-        must be identical to each other.
-
-        It is relatively common (in particular when differentiating through a linear
-        solve) to need to solve both `Ax = b` and `A^T x = b`. This method makes it
-        possible to avoid computing both `solver.init(operator)` and
-        `solver.init(operator.T)` if one can be cheaply computed from the other.
-
-        **Arguments:**
-
-        - `state`: as returned from `solver.init`.
-        - `options`: any extra options that were passed to `solve.init`.
-
-        **Returns:**
-
-        A 2-tuple of:
-
-        - The state of the transposed operator.
-        - The options for the transposed operator.
-        """
-
-    @abc.abstractmethod
-    def conj(
-        self, state: _SolverState, options: dict[str, Any]
-    ) -> tuple[_SolverState, dict[str, Any]]:
-        """Conjugate the result of [`lineax.AbstractLinearSolver.init`][].
-
-        That is, it should be the case that
-        ```python
-        state_conj, _ = solver.conj(solver.init(operator, options), options)
-        state_conj2 = solver.init(conj(operator), options)
-        ```
-        must be identical to each other.
-
-        **Arguments:**
-
-        - `state`: as returned from `solver.init`.
-        - `options`: any extra options that were passed to `solve.init`.
-
-        **Returns:**
-
-        A 2-tuple of:
-
-        - The state of the conjugated operator.
-        - The options for the conjugated operator.
-        """
-
-    @abc.abstractmethod
-    def assume_full_rank(self) -> bool:
-        """Does this solver assume that all operators are full rank?
-
-        When `False`, a more expensive backward pass is needed to account for
-        the extra generality. In a custom linear solver, it is always safe to
-        return False.
-
-        **Arguments:**
-
-        Nothing.
-
-        **Returns:**
-
-        Either `True` or `False`.
-        """
-
-
 def _check_rank_compat(
     solver: "AbstractLinearSolver", operator: AbstractLinearOperator
 ):
@@ -618,184 +474,6 @@ def _check_rank_compat(
                 "`AutoLinearSolver(well_posed=False)` or `lineax.SVD()`) to handle "
                 "rank-deficient systems via the pseudoinverse."
             )
-
-
-_qr_token = eqxi.str2jax("qr_token")
-_diagonal_token = eqxi.str2jax("diagonal_token")
-_well_posed_diagonal_token = eqxi.str2jax("well_posed_diagonal_token")
-_tridiagonal_token = eqxi.str2jax("tridiagonal_token")
-_triangular_token = eqxi.str2jax("triangular_token")
-_cholesky_token = eqxi.str2jax("cholesky_token")
-_lu_token = eqxi.str2jax("lu_token")
-_svd_token = eqxi.str2jax("svd_token")
-_hevd_token = eqxi.str2jax("hevd_token")
-
-
-# Ugly delayed import because we have the dependency chain
-# linear_solve -> AutoLinearSolver -> {Cholesky,...} -> AbstractLinearSolver
-# but we want linear_solver and AbstractLinearSolver in the same file.
-def _lookup(token) -> AbstractLinearSolver:
-    from . import _solver
-
-    # pyright doesn't know that these keys are hashable
-    _lookup_dict = {
-        _qr_token: _solver.QR(),  # pyright: ignore
-        _diagonal_token: _solver.Diagonal(),  # pyright: ignore
-        _well_posed_diagonal_token: _solver.Diagonal(  # pyright: ignore
-            well_posed=True
-        ),
-        _tridiagonal_token: _solver.Tridiagonal(),  # pyright: ignore
-        _triangular_token: _solver.Triangular(),  # pyright: ignore
-        _cholesky_token: _solver.Cholesky(),  # pyright: ignore
-        _lu_token: _solver.LU(),  # pyright: ignore
-        _svd_token: _solver.SVD(),  # pyright: ignore
-        _hevd_token: _solver.HEVD(),  # pyright: ignore
-    }
-    return _lookup_dict[token]
-
-
-_AutoLinearSolverState: TypeAlias = tuple[Any, Any]
-
-
-class AutoLinearSolver(AbstractLinearSolver[_AutoLinearSolverState]):
-    """Automatically determines a good linear solver based on the structure of the
-    operator.
-
-    - If `well_posed=True`:
-        - If the operator is diagonal, then use [`lineax.Diagonal`][].
-        - If the operator is tridiagonal, then use [`lineax.Tridiagonal`][].
-        - If the operator is triangular, then use [`lineax.Triangular`][].
-        - If the matrix is positive or negative (semi-)definite, then use
-            [`lineax.Cholesky`][].
-        - Else use [`lineax.LU`][].
-
-    This is a good choice if you want to be certain that an error is raised for
-    ill-posed systems.
-
-    - If `well_posed=False`:
-        - If the operator is diagonal, then use [`lineax.Diagonal`][].
-        - If the operator is Hermitian, then use [`lineax.HEVD`][].
-        - Else use [`lineax.SVD`][].
-
-    This is a good choice if you want to be certain that you can handle ill-posed
-    systems.
-
-    - If `well_posed=None`:
-        - If the operator is non-square, then use [`lineax.QR`][].
-        - If the operator is diagonal, then use [`lineax.Diagonal`][].
-        - If the operator is tridiagonal, then use [`lineax.Tridiagonal`][].
-        - If the operator is triangular, then use [`lineax.Triangular`][].
-        - If the matrix is positive or negative (semi-)definite, then use
-            [`lineax.Cholesky`][].
-        - Else, use [`lineax.LU`][].
-
-    This is a good choice if your primary concern is computational efficiency. It will
-    handle ill-posed systems as long as it is not computationally expensive to do so.
-    """
-
-    well_posed: bool | None
-
-    def _select_solver(self, operator: AbstractLinearOperator):
-        if self.well_posed is True:
-            if operator.in_size() != operator.out_size():
-                raise ValueError(
-                    "Cannot use `AutoLinearSolver(well_posed=True)` with a non-square "
-                    "operator. If you are trying solve a least-squares problem then "
-                    "you should pass `solver=AutoLinearSolver(well_posed=False)`. By "
-                    "default `lineax.linear_solve` assumes that the operator is "
-                    "square and nonsingular."
-                )
-            if is_diagonal(operator):
-                token = _well_posed_diagonal_token
-            elif is_tridiagonal(operator):
-                token = _tridiagonal_token
-            elif is_lower_triangular(operator) or is_upper_triangular(operator):
-                token = _triangular_token
-            elif is_positive_semidefinite(operator) or is_negative_semidefinite(
-                operator
-            ):
-                token = _cholesky_token
-            else:
-                token = _lu_token
-        elif self.well_posed is False:
-            if is_diagonal(operator):
-                token = _diagonal_token
-            elif is_hermitian(operator):
-                # A Hermitian eigendecomposition is cheaper than a general SVD, and
-                # handles ill-posed Hermitian systems via the same pseudoinverse.
-                token = _hevd_token
-            else:
-                # TODO: use rank-revealing QR instead.
-                token = _svd_token
-        elif self.well_posed is None:
-            if operator.in_size() != operator.out_size():
-                token = _qr_token
-            elif is_diagonal(operator):
-                token = _diagonal_token
-            elif is_tridiagonal(operator):
-                token = _tridiagonal_token
-            elif is_lower_triangular(operator) or is_upper_triangular(operator):
-                token = _triangular_token
-            elif is_positive_semidefinite(operator) or is_negative_semidefinite(
-                operator
-            ):
-                token = _cholesky_token
-            else:
-                token = _lu_token
-        else:
-            raise ValueError(f"Invalid value `well_posed={self.well_posed}`.")
-        return token
-
-    def select_solver(self, operator: AbstractLinearOperator) -> AbstractLinearSolver:
-        """Check which solver that [`lineax.AutoLinearSolver`][] will dispatch to.
-
-        **Arguments:**
-
-        - `operator`: a linear operator.
-
-        **Returns:**
-
-        The linear solver that will be used.
-        """
-        return _lookup(self._select_solver(operator))
-
-    def init(self, operator, options) -> _AutoLinearSolverState:
-        token = self._select_solver(operator)
-        return token, _lookup(token).init(operator, options)
-
-    def compute(
-        self,
-        state: _AutoLinearSolverState,
-        vector: PyTree[Array],
-        options: dict[str, Any],
-    ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
-        token, state = state
-        solver = _lookup(token)
-        solution, result, _ = solver.compute(state, vector, options)
-        return solution, result, {}
-
-    def transpose(self, state: _AutoLinearSolverState, options: dict[str, Any]):
-        token, state = state
-        solver = _lookup(token)
-        transpose_state, transpose_options = solver.transpose(state, options)
-        transpose_state = (token, transpose_state)
-        return transpose_state, transpose_options
-
-    def conj(self, state: _AutoLinearSolverState, options: dict[str, Any]):
-        token, state = state
-        solver = _lookup(token)
-        conj_state, conj_options = solver.conj(state, options)
-        conj_state = (token, conj_state)
-        return conj_state, conj_options
-
-    def assume_full_rank(self):
-        return self.well_posed is not False
-
-
-AutoLinearSolver.__init__.__doc__ = """**Arguments:**
-
-- `well_posed`: whether to only handle well-posed systems or not, as discussed above.
-"""
 
 
 # TODO(kidger): gmres, bicgstab
