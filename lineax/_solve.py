@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools as ft
-from types import NotImplementedType
 from typing import Any, TypeAlias
 
 import equinox as eqx
@@ -58,11 +57,25 @@ from ._tags import (
 )
 
 
-# Solvers whose factorisation cheaply yields the gram (pseudo)inverse `(AᴴA)⁺`; see
-# `_gram_partner`. (The refactor that moved `AbstractLinearSolver` out of this module
-# removed the `_solve` <-> `_solver` import cycle, so this can be a real runtime alias
-# imported at module scope rather than a `TYPE_CHECKING`-only one.)
-_HasGramPartner: TypeAlias = QR | SVD | HEVD | Normal
+# Solver types whose factorisation *may* cheaply yield the gram (pseudo)inverse
+# `(AᴴA)⁺`. Whether one actually does can depend on the state (e.g. `Normal` only when
+# tall), so `_has_gram_partner` is the definitive runtime check; see `_gram_partner`.
+# (The refactor that moved `AbstractLinearSolver` out of this module removed the
+# `_solve` <-> `_solver` import cycle, so this can be a real runtime alias imported at
+# module scope rather than a `TYPE_CHECKING`-only one.)
+_MaybeHasGramPartner: TypeAlias = QR | SVD | HEVD | Normal
+
+
+def _has_gram_partner(solver: AbstractLinearSolver, state: Any) -> bool:
+    """Whether `_gram_partner(solver, ..., state)` can supply the gram (pseudo)inverse.
+
+    `Normal` only has one when tall (its inner operator is then `AᴴA`; when wide it
+    factorises `AAᴴ` instead). Every other `_MaybeHasGramPartner` always does.
+    """
+    if isinstance(solver, Normal):
+        _, tall, _, _ = state
+        return tall.value
+    return isinstance(solver, _MaybeHasGramPartner)
 
 
 #
@@ -174,17 +187,17 @@ def _squared_rcond(rcond: float | None, n: int, m: int, dtype) -> float:
 
 
 def _gram_partner(
-    solver: _HasGramPartner,
+    solver: _MaybeHasGramPartner,
     gram_operator: AbstractLinearOperator,
     state: Any,
-) -> tuple[AbstractLinearSolver, Any] | NotImplementedType:
-    """For a solver with a gram partner, return a `(gram_solver, gram_state)` pair such
-    that `linear_solve_p(gram_operator, gram_state, v, gram_solver)` computes
-    `(AᴴA)⁺ v` (where `gram_operator` is `AᴴA`). Otherwise return `NotImplemented`.
+) -> tuple[AbstractLinearSolver, Any]:
+    """Return a `(gram_solver, gram_state)` pair such that
+    `linear_solve_p(gram_operator, gram_state, v, gram_solver)` computes `(AᴴA)⁺ v`
+    (where `gram_operator` is `AᴴA`). Requires `_has_gram_partner(solver, state)`.
 
-    Every non-well-posed solver has a "gram partner" -- a solver representing the
-    (pseudo)inverse of the gram matrix `AᴴA`, obtainable from the existing
-    factorisation with no further decomposition:
+    Each candidate solver's gram partner -- a solver representing the (pseudo)inverse of
+    the gram matrix `AᴴA` -- is obtained from the existing factorisation with no further
+    decomposition:
 
         QR     `A = QR`    -> `Cholesky`, since `AᴴA = RᴴR` (`R` is the factor)
         SVD    `A = UΣVᴴ`  -> `HEVD` with eigenvectors `V`, eigenvalues `σ²`
@@ -200,41 +213,34 @@ def _gram_partner(
     if isinstance(solver, Normal):
         inner_state, tall, _, _ = state
         if not tall.value:
-            # Wide: the inner solver factorises `AAᴴ`, not `AᴴA`; no cheap `(AᴴA)⁺`.
-            # (This is reachable only for a rank-deficient inner solver, e.g. HEVD;
-            # for a full-rank inner the wide case has independent rows, so the JVP
-            # never takes this branch.)
-            return NotImplemented
+            # Wide: the inner solver factorises `AAᴴ`, not `AᴴA`. `_has_gram_partner`
+            # excludes this, so reaching here is a caller bug.
+            raise ValueError("`Normal` has a gram partner only for tall operators")
         # Tall: the inner solver already factorises `AᴴA`, so its state *is* the gram
         # state. This holds for any inner solver (Cholesky, CG, HEVD, ...).
         return solver.inner_solver, inner_state
     if isinstance(solver, QR):
         (a, _), transpose, _ = state
         if transpose.value:
-            # Unreachable: QR is full rank, so this branch is taken only when
+            # QR is full rank, so the JVP reaches the gram path only when
             # `rows > columns` (tall), where the stored factorisation is of `A`.
-            raise RuntimeError(
-                "internal error: the QR gram partner is tall-only; please report at "
-                "https://github.com/patrick-kidger/lineax"
-            )
+            raise ValueError("`QR` has a gram partner only for tall operators")
         # Tall `A = QR` => `AᴴA = RᴴR`: the QR factor `R` is the upper Cholesky factor.
         r = a[: a.shape[1]]
         return Cholesky(), (r, eqxi.Static(False))
-    if isinstance(solver, (SVD, HEVD)):
-        packed = pack_structures(gram_operator)
-        if isinstance(solver, SVD):
-            (u, s, vt), _ = state
-            # `(AᴴA)⁺ = V Σ⁻² Vᴴ`.
-            eigenvalues, eigenvectors = s**2, vt.conj().T
-            rcond = _squared_rcond(solver.rcond, vt.shape[1], u.shape[0], s.dtype)
-        else:
-            (w, eigenvectors), _ = state
-            # `(AᴴA)⁺ = (A²)⁺ = V W⁻² Vᴴ`.
-            eigenvalues = w**2
-            m = eigenvectors.shape[0]
-            rcond = _squared_rcond(solver.rcond, m, m, w.dtype)
-        return HEVD(rcond=rcond), ((eigenvalues, eigenvectors), packed)
-    return NotImplemented
+    packed = pack_structures(gram_operator)
+    if isinstance(solver, SVD):
+        (u, s, vt), _ = state
+        # `(AᴴA)⁺ = V Σ⁻² Vᴴ`.
+        eigenvalues, eigenvectors = s**2, vt.conj().T
+        rcond = _squared_rcond(solver.rcond, vt.shape[1], u.shape[0], s.dtype)
+    else:
+        (w, eigenvectors), _ = state
+        # `(AᴴA)⁺ = (A²)⁺ = V W⁻² Vᴴ`.
+        eigenvalues = w**2
+        m = eigenvectors.shape[0]
+        rcond = _squared_rcond(solver.rcond, m, m, w.dtype)
+    return HEVD(rcond=rcond), ((eigenvalues, eigenvectors), packed)
 
 
 @eqxi.filter_primitive_jvp
@@ -324,26 +330,11 @@ def _linear_solve_jvp(primals, tangents):
             # left-multiplied by `A⁺` along with the other `vecs`). The gram operator
             # is never materialised -- the gram solve reads only `gram_state` -- but it
             # carries the right structure and (for higher-order autodiff) tangent.
-            gram_operator = TaggedLinearOperator(
-                operator.H @ operator, positive_semidefinite_tag
-            )
-            if isinstance(solver, _HasGramPartner):
-                gram_partner = _gram_partner(solver, gram_operator, state)
-            else:
-                gram_partner = NotImplemented
-            if gram_partner is NotImplemented:
-                tmp, _, _ = eqxi.filter_primitive_bind(
-                    linear_solve_p,
-                    operator_conj_transpose,  # pyright: ignore
-                    state_conj_transpose,  # pyright: ignore
-                    tmp,
-                    options_conj_transpose,  # pyright: ignore
-                    solver,
-                    True,
+            if _has_gram_partner(solver, state):
+                gram_operator = TaggedLinearOperator(
+                    operator.H @ operator, positive_semidefinite_tag
                 )
-                vecs.append(tmp)
-            else:
-                gram_solver, gram_state = gram_partner
+                gram_solver, gram_state = _gram_partner(solver, gram_operator, state)
                 gram_inv, _, _ = eqxi.filter_primitive_bind(
                     linear_solve_p,
                     gram_operator,
@@ -356,6 +347,17 @@ def _linear_solve_jvp(primals, tangents):
                 # `(AᴴA)⁺ w` already lives in the input space, so it bypasses the
                 # outer `A⁺`: append directly to the already-solved `sols`.
                 sols.append(gram_inv)
+            else:
+                tmp, _, _ = eqxi.filter_primitive_bind(
+                    linear_solve_p,
+                    operator_conj_transpose,  # pyright: ignore
+                    state_conj_transpose,  # pyright: ignore
+                    tmp,
+                    options_conj_transpose,  # pyright: ignore
+                    solver,
+                    True,
+                )
+                vecs.append(tmp)
 
         if not assume_independent_columns:
             tmp1, _, _ = eqxi.filter_primitive_bind(
