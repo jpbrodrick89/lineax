@@ -466,11 +466,18 @@ def is_hermitian(operator: AbstractLinearOperator) -> bool:
 
     Either `True` or `False.`
     """
-    # Unlike the other property checks, the default is `False` rather than an error:
-    # `is_hermitian` is an optional optimisation hint (used to dispatch to `HEVD` and to
-    # shortcut the linear-solve JVP), and `False` is always the safe answer (it just
-    # forgoes the optimisation). This means custom `AbstractLinearOperator`s written
-    # before `is_hermitian` existed keep working without registering it.
+    # Default for operators that don't register `is_hermitian` explicitly (e.g. custom
+    # `AbstractLinearOperator`s written before it existed): derive it from the other
+    # property checks, the same way the built-in operators do -- minus the
+    # `hermitian_tag` check, which needs operator-specific `.tags`. PSD/NSD operators
+    # are Hermitian (real or complex); real symmetric ones are too. This keeps
+    # `is_hermitian` correct -- and the HEVD/JVP optimisations available -- for such
+    # operators without requiring a new registration, rather than raising (the checks
+    # it defers to are already required for, e.g., `__check_init__` and `Cholesky`).
+    if is_positive_semidefinite(operator) or is_negative_semidefinite(operator):
+        return True
+    if _has_real_dtype(operator) and is_symmetric(operator):
+        return True
     return False
 
 
