@@ -413,7 +413,7 @@ def tridiagonal(
     _default_not_implemented("tridiagonal", operator)
 
 
-def _has_real_dtype(operator) -> bool:
+def has_real_dtype(operator) -> bool:
     """Check if all dtypes in an operator's structure are real (not complex)."""
     leaves = jtu.tree_leaves((operator.in_structure(), operator.out_structure()))
     dtype = jnp.result_type(*leaves)
@@ -476,7 +476,7 @@ def is_hermitian(operator: AbstractLinearOperator) -> bool:
     # it defers to are already required for, e.g., `__check_init__` and `Cholesky`).
     if is_positive_semidefinite(operator) or is_negative_semidefinite(operator):
         return True
-    if _has_real_dtype(operator) and is_symmetric(operator):
+    if has_real_dtype(operator) and is_symmetric(operator):
         return True
     return False
 

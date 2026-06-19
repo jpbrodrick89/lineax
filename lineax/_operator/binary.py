@@ -20,10 +20,10 @@ import jax.numpy as jnp
 from equinox.internal import ω
 
 from .base import (
-    _has_real_dtype,
     AbstractLinearOperator,
     conj,
     diagonal,
+    has_real_dtype,
     has_unit_diagonal,
     is_diagonal,
     is_hermitian,
@@ -257,7 +257,7 @@ def _(operator):
     return (
         is_diagonal(operator.operator1)
         and is_diagonal(operator.operator2)
-        and _has_real_dtype(operator)
+        and has_real_dtype(operator)
     )
 
 

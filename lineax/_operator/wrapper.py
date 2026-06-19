@@ -40,11 +40,11 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
-    _has_real_dtype,
     AbstractLinearOperator,
     as_frozenset,
     conj,
     diagonal,
+    has_real_dtype,
     has_unit_diagonal,
     is_diagonal,
     is_hermitian,
@@ -545,7 +545,7 @@ def _(operator):
     ):
         return True
     if symmetric_tag in tags or diagonal_tag in tags:
-        return _has_real_dtype(operator)
+        return has_real_dtype(operator)
     return False
 
 

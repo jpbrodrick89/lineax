@@ -49,12 +49,12 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
-    _has_real_dtype,
     AbstractLinearOperator,
     as_frozenset,
     conj,
     diagonal,
     FlatPyTree,
+    has_real_dtype,
     has_unit_diagonal,
     inexact_structure,
     is_diagonal,
@@ -742,7 +742,7 @@ def _(operator):
         or negative_semidefinite_tag in operator.tags
         or hermitian_tag in operator.tags
     ):
-        return _has_real_dtype(operator)
+        return has_real_dtype(operator)
     return False
 
 
@@ -762,7 +762,7 @@ def _(operator):
     # Symmetric (A = A^T) or diagonal operators are Hermitian only for real dtypes;
     # for complex, A = A^T does not imply A = A^H.
     if symmetric_tag in operator.tags or diagonal_tag in operator.tags:
-        return _has_real_dtype(operator)
+        return has_real_dtype(operator)
     return False
 
 

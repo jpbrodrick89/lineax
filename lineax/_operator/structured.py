@@ -36,11 +36,11 @@ from .._misc import (
     strip_weak_dtype,
 )
 from .base import (
-    _has_real_dtype,
     AbstractLinearOperator,
     conj,
     diagonal,
     FlatPyTree,
+    has_real_dtype,
     has_unit_diagonal,
     inexact_structure,
     is_diagonal,
@@ -308,7 +308,7 @@ def _(operator):
 @is_hermitian.register(DiagonalLinearOperator)
 def _(operator):
     # A diagonal matrix is Hermitian iff its diagonal is real-valued.
-    return _has_real_dtype(operator)
+    return has_real_dtype(operator)
 
 
 @is_symmetric.register(TridiagonalLinearOperator)
