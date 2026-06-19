@@ -466,7 +466,12 @@ def is_hermitian(operator: AbstractLinearOperator) -> bool:
 
     Either `True` or `False.`
     """
-    _default_not_implemented("is_hermitian", operator)
+    # Unlike the other property checks, the default is `False` rather than an error:
+    # `is_hermitian` is an optional optimisation hint (used to dispatch to `HEVD` and to
+    # shortcut the linear-solve JVP), and `False` is always the safe answer (it just
+    # forgoes the optimisation). This means custom `AbstractLinearOperator`s written
+    # before `is_hermitian` existed keep working without registering it.
+    return False
 
 
 @ft.singledispatch
