@@ -24,7 +24,7 @@ import jax.tree_util as jtu
 from equinox.internal import ω
 from jaxtyping import Array, ArrayLike, Bool, Float, Inexact, PyTree
 
-from .._misc import structure_equal
+from .._misc import structure_equal, tree_where
 from .._norm import max_norm, two_norm
 from .._operator import AbstractLinearOperator, conj, linearise, MatrixLinearOperator
 from .._solution import RESULTS
@@ -98,8 +98,15 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
     #    passing a dummy initial residual.
     # 5. We return the number of steps, and whether or not the solve succeeded, as
     #    additional information.
-    # 6. We do not use the unnecessary loop within Gram-Schmidt, and simply compute
-    #    this in a single pass.
+    # 6. Our Gram-Schmidt reorthogonalises a second time whenever the first pass'
+    #    projection removed most of the vector's norm (Björck's criterion for
+    #    detecting a severe loss of orthogonality), rather than in a fixed-iteration
+    #    loop. (jax's `_iterative_classical_gram_schmidt` intends to do something
+    #    similar, iterating up to `max_iterations=2` times, but as called this is
+    #    always exactly 1 -- the loop's condition requires
+    #    `steps < (max_iterations - 1)`, which is already false after the first pass,
+    #    so the loop body never runs and no reorthogonalisation ever actually
+    #    happens.)
     # 7. We add better safety checks for breakdown, and a safety check for stagnation
     #    of the iterates even when we don't explicitly get breakdown.
     #
@@ -326,15 +333,6 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
 
         return y_new, r_new, breakdown, diff
 
-        # NOTE: in the jax implementation:
-        # https://github.com/google/jax/blob/
-        # c662fd216dec10cdb2cff4138b4318bb98853134/jax/_src/scipy/sparse/linalg.py#L327
-        # _classical_iterative_gram_schmidt uses a while loop to call this.
-        # However, max_iterations is set to 2 in all calls they make to the function,
-        # and the condition function requires steps < (max_iterations - 1).
-        # This means that in fact they only apply Gram-Schmidt once, and using a
-        # while_loop is unnecessary.
-
     def _arnoldi_gram_schmidt(
         self,
         operator,
@@ -366,11 +364,34 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         contract_matrix = lambda x, y: ft.partial(
             jnp.tensordot, axes=x.ndim, precision=lax.Precision.HIGHEST
         )(x, y[...].conj())
-        _proj = jtu.tree_map(contract_matrix, basis_step, basis)
-        proj = jtu.tree_reduce(lambda x, y: x + y, _proj)
-        proj_on_cols = jtu.tree_map(lambda _, x: x[...] @ proj, vector, basis)
-        # now remove the component of the vector in that subspace
-        basis_step_new = (basis_step**ω - proj_on_cols**ω).ω
+
+        def project_out(v):
+            # Projects `v` onto the existing (orthonormal) basis columns, and returns
+            # both the overlaps (the corresponding Hessenberg-column entries) and `v`
+            # with that component removed.
+            _proj = jtu.tree_map(contract_matrix, v, basis)
+            proj = jtu.tree_reduce(lambda x, y: x + y, _proj)
+            proj_on_cols = jtu.tree_map(lambda _, x: x[...] @ proj, vector, basis)
+            return proj, (v**ω - proj_on_cols**ω).ω
+
+        proj, basis_step_new = project_out(basis_step)
+
+        # Classical Gram-Schmidt (as used here, so that the projection onto every
+        # existing basis vector can be computed as a single batched contraction,
+        # rather than the sequential, one-basis-vector-at-a-time projections of
+        # Modified Gram-Schmidt) is prone to a severe loss of orthogonality whenever
+        # `basis_step` is nearly represented by the existing basis already, i.e.
+        # whenever the projection removes most of its norm. Björck's criterion below
+        # detects exactly this regime (a drop in norm by more than a factor of
+        # `sqrt(2)`), and reruns the projection a second time in response, driving the
+        # loss of orthogonality back down to (near) machine precision -- "twice is
+        # enough". This costs one extra projection against the (already-available, no
+        # new matrix-vector product required) existing basis, only when needed.
+        needs_second_pass = two_norm(basis_step_new) < step_norm / jnp.sqrt(2.0)
+        proj2, basis_step_new2 = project_out(basis_step_new)
+        proj = tree_where(needs_second_pass, proj + proj2, proj)
+        basis_step_new = tree_where(needs_second_pass, basis_step_new2, basis_step_new)
+
         eps = step_norm * jnp.finfo(proj.dtype).eps
         basis_step_normalised, step_norm_new, breakdown = self._normalise(
             basis_step_new, eps=eps
