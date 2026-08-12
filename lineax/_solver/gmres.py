@@ -388,27 +388,19 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # rather than the sequential, one-basis-vector-at-a-time projections of
         # Modified Gram-Schmidt) is prone to a severe loss of orthogonality whenever
         # `basis_step` is nearly represented by the existing basis already, i.e.
-        # whenever the projection removes most of its norm. Björck's criterion below
-        # detects exactly this regime (a drop in norm by more than a factor of
-        # `sqrt(2)`), and reruns the projection a second time in response, driving the
-        # loss of orthogonality back down to (near) machine precision -- "twice is
-        # enough". `lax.cond` (rather than e.g. `jnp.where`, which would evaluate both
-        # branches unconditionally) means the extra projection is actually skipped,
-        # not just discarded, when it isn't needed; `eqxi.unvmap_any` makes the
-        # (otherwise per-batch-element) predicate safe to use as `lax.cond`'s scalar
-        # condition under `vmap`, matching `first_pass` below.
-        needs_second_pass = two_norm(basis_step_new) < step_norm / jnp.sqrt(2.0)
-
-        def second_pass(_):
-            proj2, basis_step_new2 = project_out(basis_step_new)
-            return proj + proj2, basis_step_new2
-
-        def no_second_pass(_):
-            return proj, basis_step_new
-
-        proj, basis_step_new = lax.cond(
-            eqxi.unvmap_any(needs_second_pass), second_pass, no_second_pass, None
-        )
+        # whenever the projection removes most of its norm. Unconditionally
+        # reorthogonalizing a second time ("CGS2") drives the loss of orthogonality
+        # back down to (near) machine precision regardless -- "twice is enough". A
+        # data-dependent skip (e.g. only reorthogonalizing when a cheap norm-drop
+        # criterion detects the bad case) sounds like it should be cheaper on
+        # average, but isn't in practice here: it requires branching on that
+        # criterion with `lax.cond`, and benchmarking shows the resulting dispatch
+        # overhead is comparable to or larger than the projection it's saving for
+        # every problem size tried short of very large `n`, while *always* costing
+        # more to compile. So we just always pay for the second pass.
+        proj2, basis_step_new2 = project_out(basis_step_new)
+        proj = proj + proj2
+        basis_step_new = basis_step_new2
 
         eps = step_norm * jnp.finfo(proj.dtype).eps
         basis_step_normalised, step_norm_new, breakdown = self._normalise(
