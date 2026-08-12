@@ -22,7 +22,6 @@ import jax.tree_util as jtu
 from equinox.internal import ω
 from jaxtyping import Array, PyTree
 
-from .._misc import tree_where
 from .._norm import max_norm, tree_dot
 from .._operator import AbstractLinearOperator, conj, linearise
 from .._solution import RESULTS
@@ -131,10 +130,9 @@ class BiCGStab(AbstractLinearSolver[_BiCGStabState]):
             else:
                 return True
 
-        def r_already_converged(r):
+        def is_converged(r):
             # Whether `r`, used as a residual in its own right, already satisfies the
-            # `b`-space tolerance. Used to detect the case in which the half-step
-            # residual `s` (see `body_fun`) is already converged.
+            # `b`-space tolerance.
             if has_scale:
                 return self.norm(r) <= b_scale  # pyright: ignore
             else:
@@ -150,22 +148,11 @@ class BiCGStab(AbstractLinearSolver[_BiCGStabState]):
         def body_fun(carry):
             y, r, alpha, omega, rho, p, v, diff, step = carry
 
-            # `r` is already converged. This happens whenever `r0` lies (numerically)
-            # in an invariant subspace of the preconditioned operator, so that
-            # BiCGStab has, in effect, already solved the system in fewer steps than
-            # the recurrence "expects" (this is the state left behind by the
-            # `s_converged` case below, one iteration later). Continuing regardless
-            # would divide the now-tiny `rho_new = <r0, r>` by an equally-tiny
-            # `<r0, v_new>` to form `alpha_new` -- at best ill-conditioned, at worst
-            # an unguarded `0 / 0`. `scipy.sparse.linalg.bicgstab` (and
-            # `jax.scipy.sparse.linalg.bicgstab`, which copies it) guard exactly this
-            # by checking `norm(r) < atol` at the very top of every iteration; we do
-            # the same, and additionally force a genuine no-op step (`diff = 0`, `r`
-            # unchanged) so that `not_converged` is guaranteed to correctly detect
-            # quiescence on the next `cond_fun` evaluation, regardless of whatever
-            # `alpha_new`/`omega_new`/`rho_new` this (otherwise-unused) iteration
-            # computes.
-            r_converged = r_already_converged(r)
+            # If `r` is already converged (e.g. `r0` lies in an invariant subspace of
+            # the preconditioned operator), `rho_new` below is ~0, and dividing it by
+            # the equally-~0 `<r0, v_new>` to form `alpha_new` would be an unguarded
+            # `0 / 0`. Guard it as `scipy`/`jax.scipy`'s `bicgstab` do.
+            r_converged = is_converged(r)
 
             rho_new = tree_dot(r0, r)
             beta = (rho_new / rho) * (alpha / omega)
@@ -183,28 +170,20 @@ class BiCGStab(AbstractLinearSolver[_BiCGStabState]):
             z = preconditioner.mv(s)
             t = operator.mv(z)
 
-            # `s` is already converged. This happens whenever `r` (unlike above) was
-            # not yet converged when this iteration started, but the alpha-step
-            # already reduces it to (numerically) zero, so that `t = A(M(s))` is also
-            # (numerically) zero. Unguarded, `omega_new = <s, t> / <t, t>` would then
-            # be an unprotected `0 / 0`, producing `nan` that (a) poisons `y` and `r`,
-            # and (b) evades `breakdown_occurred` above, since `nan == 0.0` is
-            # `False`. In this case we skip the stabilisation half-step entirely,
-            # matching the equivalent early-exit guard in
-            # `scipy.sparse.linalg.bicgstab` / `jax.scipy.sparse.linalg.bicgstab`.
-            # We report `omega_new = 1`, rather than `0`, so as not to spuriously
-            # trigger `breakdown_occurred` (which treats `omega == 0` as a sign of
-            # true stagnation) -- instead, the next iteration harmlessly hits the
-            # `r_converged` case above.
-            s_converged = r_already_converged(s)
-            t_dot_t = tree_dot(t, t)
-            omega_new = tree_dot(s, t) / jnp.where(s_converged, 1, t_dot_t)
+            # Likewise, if the alpha-step alone already converges (so `t = A(M(s))`
+            # is also ~0), `omega_new = <s, t> / <t, t>` would be an unguarded `0 / 0`,
+            # producing `nan` that poisons `y` and `r` and evades `breakdown_occurred`
+            # (`nan == 0.0` is `False`). We report `omega_new = 1`, not `0`, so as not
+            # to spuriously trigger `breakdown_occurred` -- the next iteration then
+            # harmlessly hits the `r_converged` case above instead.
+            s_converged = is_converged(s)
+            t2 = tree_dot(t, t)
+            omega_new = tree_dot(s, t) / jnp.where(s_converged, 1, t2)
             omega_new = jnp.where(s_converged, 1, omega_new)
 
             diff = (alpha_new * x**ω + omega_new * z**ω).ω
-            diff = tree_where(r_converged, ω(diff).call(jnp.zeros_like).ω, diff)
             y_new = (y**ω + diff**ω).ω
-            r_new = tree_where(r_converged, r, (s**ω - omega_new * t**ω).ω)
+            r_new = (s**ω - omega_new * t**ω).ω
             return (
                 y_new,
                 r_new,
