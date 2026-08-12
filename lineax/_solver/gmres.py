@@ -24,7 +24,7 @@ import jax.tree_util as jtu
 from equinox.internal import ω
 from jaxtyping import Array, ArrayLike, Bool, Float, Inexact, PyTree
 
-from .._misc import structure_equal, tree_where
+from .._misc import structure_equal
 from .._norm import max_norm, two_norm
 from .._operator import AbstractLinearOperator, conj, linearise, MatrixLinearOperator
 from .._solution import RESULTS
@@ -361,6 +361,13 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             operator.mv(jtu.tree_map(lambda _, x: x[..., step], vector, basis))
         )
         step_norm = two_norm(basis_step)
+        # `basis_step` is a single pytree ("vector"); `basis` is the same pytree
+        # structure but with an extra trailing axis of size `restart + 1` holding
+        # every existing Krylov column. Contracting `x`'s `x.ndim` axes against `y`'s
+        # matching leading axes therefore computes, in one batched shot, the pytree
+        # inner product of `basis_step` against *every* existing column at once --
+        # i.e. a batched generalisation of `tree_dot` (`tree_dot` itself doesn't apply
+        # here, since it requires both trees to share exactly the same structure).
         contract_matrix = lambda x, y: ft.partial(
             jnp.tensordot, axes=x.ndim, precision=lax.Precision.HIGHEST
         )(x, y[...].conj())
@@ -385,12 +392,23 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # detects exactly this regime (a drop in norm by more than a factor of
         # `sqrt(2)`), and reruns the projection a second time in response, driving the
         # loss of orthogonality back down to (near) machine precision -- "twice is
-        # enough". This costs one extra projection against the (already-available, no
-        # new matrix-vector product required) existing basis, only when needed.
+        # enough". `lax.cond` (rather than e.g. `jnp.where`, which would evaluate both
+        # branches unconditionally) means the extra projection is actually skipped,
+        # not just discarded, when it isn't needed; `eqxi.unvmap_any` makes the
+        # (otherwise per-batch-element) predicate safe to use as `lax.cond`'s scalar
+        # condition under `vmap`, matching `first_pass` below.
         needs_second_pass = two_norm(basis_step_new) < step_norm / jnp.sqrt(2.0)
-        proj2, basis_step_new2 = project_out(basis_step_new)
-        proj = tree_where(needs_second_pass, proj + proj2, proj)
-        basis_step_new = tree_where(needs_second_pass, basis_step_new2, basis_step_new)
+
+        def second_pass(_):
+            proj2, basis_step_new2 = project_out(basis_step_new)
+            return proj + proj2, basis_step_new2
+
+        def no_second_pass(_):
+            return proj, basis_step_new
+
+        proj, basis_step_new = lax.cond(
+            eqxi.unvmap_any(needs_second_pass), second_pass, no_second_pass, None
+        )
 
         eps = step_norm * jnp.finfo(proj.dtype).eps
         basis_step_normalised, step_norm_new, breakdown = self._normalise(
