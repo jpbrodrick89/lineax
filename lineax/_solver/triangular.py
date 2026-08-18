@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
+from .._misc import unit_phase
 from .._operator import (
     AbstractLinearOperator,
     has_unit_diagonal,
@@ -122,7 +123,7 @@ class Triangular(AbstractDirectLinearSolver[_TriangularState]):
             lad = jnp.zeros((), dtype=matrix.real.dtype)
         else:
             d = jnp.diag(matrix)
-            sign = jnp.prod(jnp.sign(d))
+            sign = jnp.prod(unit_phase(d))
             lad = jnp.sum(jnp.log(jnp.abs(d)))
         return sign, lad
 

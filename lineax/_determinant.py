@@ -31,7 +31,11 @@ from ._operator import (
 )
 from ._solve import AbstractDirectLinearSolver, linear_solve
 from ._solver import AutoLinearSolver
+from ._solver.circulant import Circulant
+from ._solver.diagonal import Diagonal
 from ._solver.normal import Normal
+from ._solver.triangular import Triangular
+from ._solver.tridiagonal import Tridiagonal
 
 
 def _det_sign_error_msg(
@@ -64,6 +68,27 @@ def _slogdet(operator, solver, options, state):
 def _slogdet_jvp(primals, tangents):
     operator, solver, options, state = primals
     t_operator, _, _, _ = tangents
+
+    # `AutoLinearSolver` forwards `slogdet` to whatever it selected, so look through it.
+    if isinstance(solver, AutoLinearSolver):
+        inner_solver = solver.select_solver(operator)
+    else:
+        inner_solver = solver
+    # These are the solvers that *benefit* from being differentiated through, not merely
+    # the ones that can be: `LU` differentiates perfectly well, but differentiating its
+    # factorisation costs as much as the solves it would save. For these four the
+    # determinant comes straight from the operator's entries -- a product of the
+    # diagonal, a three-term minor recurrence, or an FFT -- so differentiating it is
+    # O(n) (O(n log n) for `Circulant`), against O(n**2) work *and memory* for the
+    # generic rule below, which needs a 34GB tangent for a tridiagonal operator at
+    # n = 65536 and simply runs out. Only add a solver here whose `init` and `slogdet`
+    # are pure JAX: `QR` would raise `NotImplementedError` for `geqrf`.
+    if isinstance(inner_solver, Diagonal | Triangular | Tridiagonal | Circulant):
+        return jax.jvp(
+            lambda o: solver.slogdet(solver.init(o, options), options),
+            (operator,),
+            (t_operator,),
+        )
 
     sign, lad = solver.slogdet(state, options)
 

@@ -18,6 +18,7 @@ import jax.lax as lax
 import jax.numpy as jnp
 from jaxtyping import Array, PyTree
 
+from .._misc import unit_phase
 from .._operator import AbstractLinearOperator, is_tridiagonal, tridiagonal
 from .._solution import RESULTS
 from .base import AbstractDirectLinearSolver
@@ -89,7 +90,18 @@ class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
     ) -> tuple[Array, Array]:
         del options
         (diagonal, lower_diagonal, upper_diagonal), _ = state
-        return tridiagonal_slogdet(diagonal, lower_diagonal, upper_diagonal)
+        if diagonal.shape[0] == 1:
+            return unit_phase(diagonal[0]), jnp.log(jnp.abs(diagonal[0]))
+        # Two evaluations of the same three-term minor recurrence, differing only in how
+        # they associate it: sequentially, which is optimal on CPU, or as a tree, which
+        # is what GPUs need. See the block comment below the class.
+        return lax.platform_dependent(
+            diagonal,
+            lower_diagonal,
+            upper_diagonal,
+            cpu=_slogdet_sequential,
+            default=_slogdet_parallel,
+        )
 
     def assume_full_rank(self):
         return True
@@ -121,29 +133,41 @@ Nothing.
 #     `lax.scan` iteration costs a kernel launch (~8us) whatever the work inside it,
 #     so the sequential form costs ~8us * n / block and is 20x-20000x slower.
 #
-# `tridiagonal_slogdet` picks between them with `lax.platform_dependent`, and is also
-# the entry point used by the `slogdet` JVP rule (which differentiates the *parallel*
-# form on every platform -- see `_determinant.py`).
+# `Tridiagonal.slogdet` picks between them with `lax.platform_dependent`. `lx.slogdet`'s
+# JVP rule differentiates that, so each platform also reverses the implementation it
+# uses for the primal -- which is what you want: at n = 8192 reverse mode costs 1.2-1.6x
+# the primal for the tree and 3.2-4.9x for the scan, but the scan's primal is cheap
+# enough on CPU that it still wins there (262us against 849us).
 # ----------------------------------------------------------------------------------
 
 # Number of raw recurrence steps between renormalisations. Bigger blocks amortise the
 # renormalisation over more steps; smaller blocks let the minors decay further before a
-# block underflows. A block underflows once the minors decay past float range within
-# it, i.e. roughly when R * K > 308 for an operator whose entries span 10**-R, so this
-# directly sets the tolerated grading:
+# block underflows. A block underflows once the minors decay past float range within it,
+# i.e. roughly when R * K > 308 for an operator whose entries span 10**-R, so this caps
+# the tolerated grading. Largest R that both implementations get right, measured over
+# six draws of `test_tridiagonal_slogdet_graded`'s construction at n = 128:
 #
-#     K = 16 -> R ~ 19     K = 8 -> R ~ 38     K = 4 -> R ~ 77     K = 2 -> R ~ 154
+#     K:                 2     4     8    16    32
+#     sequential:      108    66    38    20    10
+#     parallel:         68    66    38    20    10
+#     heuristic 308/K: 154    77    38    19    10
 #
-# 4 is the smallest value that still beats LAPACK `gttrf` on CPU at every size
-# (1.1-1.5x unbatched, 2.2-3.0x batched). Going to 2 buys more grading tolerance but
-# only reaches parity with `gttrf` unbatched, and is *less* safe rather than more: its
+# The heuristic is accurate for K >= 8 and optimistic below it, where something else
+# binds first: the tree in `_slogdet_parallel` has its own ceiling near 68 decades,
+# because a tree group spans exponentially many steps between renormalisations. At
+# K = 4 both paths break at the same R, so the GPU path costs no grading tolerance.
+#
+# 4 is also the smallest value that still beats LAPACK `gttrf` on CPU at every size
+# (1.1-1.5x unbatched, 2.2-3.0x batched). Going to 2 buys tolerance only on CPU, only
+# reaches parity with `gttrf` unbatched, and is *less* safe rather than more: its
 # per-block decay lands inside the denormal band, so instead of underflowing cleanly
 # to -inf it returns a silently wrong answer (~5e-4 relative) for R in 120..150.
 #
-# 8 would be 1.3x faster again on CPU, but it halves the tolerated grading to ~38
-# decades (`test_tridiagonal_slogdet_graded` pins 40), and it buys nothing on GPU:
+# 8 would be 1.3x faster again on CPU, but its limit is *exactly* the 40 decades that
+# `test_tridiagonal_slogdet_graded` pins, so there would be no margin at all -- and on
+# GPU it fails silently rather than underflowing to -inf. It buys nothing there anyway:
 # `_slogdet_parallel` is within noise between 4 and 8 at every size measured, because
-# there the launch count is `block + log_radix(n/block)` rather than `n / block`.
+# its launch count is `block + log_radix(n / block)` rather than `n / block`.
 _SLOGDET_BLOCK = 4
 
 # Fan-in of the tree in `_slogdet_parallel`: how many chunk transfer matrices are
@@ -151,24 +175,6 @@ _SLOGDET_BLOCK = 4
 # hence fewer kernel launches) and is within noise of 8 and 16; 2 is slightly more
 # accurate on near-defective operators, if that is ever worth the time.
 _SLOGDET_RADIX = 4
-
-
-def tridiagonal_slogdet(
-    diagonal: Array, lower_diagonal: Array, upper_diagonal: Array
-) -> tuple[Array, Array]:
-    """`(sign, log|det|)` of the tridiagonal operator with these three diagonals.
-
-    Follows the same convention as `numpy.linalg.slogdet`.
-    """
-    if diagonal.shape[0] == 1:
-        return jnp.sign(diagonal[0]), jnp.log(jnp.abs(diagonal[0]))
-    return lax.platform_dependent(
-        diagonal,
-        lower_diagonal,
-        upper_diagonal,
-        cpu=_slogdet_sequential,
-        default=_slogdet_parallel,
-    )
 
 
 def _prescale(
@@ -280,7 +286,7 @@ def _slogdet_sequential(
         + jnp.sum(jnp.log(scales))
         + jnp.log(jnp.abs(det))
     )
-    return jnp.sign(det), lad
+    return unit_phase(det), lad
 
 
 # The same recurrence, written as a product of 2x2 transfer matrices:
@@ -407,4 +413,4 @@ def _slogdet_parallel(
         + log_scale[0]
         + jnp.log(jnp.abs(det))
     )
-    return jnp.sign(det), lad
+    return unit_phase(det), lad

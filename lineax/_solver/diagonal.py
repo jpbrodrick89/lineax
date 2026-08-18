@@ -17,7 +17,7 @@ from typing import Any, TypeAlias
 import jax.numpy as jnp
 from jaxtyping import Array, PyTree
 
-from .._misc import resolve_rcond
+from .._misc import resolve_rcond, unit_phase
 from .._operator import AbstractLinearOperator, diagonal, has_unit_diagonal, is_diagonal
 from .._solution import RESULTS
 from .base import AbstractDirectLinearSolver
@@ -114,10 +114,10 @@ class Diagonal(AbstractDirectLinearSolver[_DiagonalState]):
             abs_diag = jnp.abs(diag)
             mask = abs_diag > rcond * jnp.max(abs_diag)
             safe_diag = jnp.where(mask, diag, 1.0)
-            sign = jnp.prod(jnp.sign(safe_diag))
+            sign = jnp.prod(unit_phase(safe_diag))
             lad = jnp.sum(jnp.where(mask, jnp.log(abs_diag), 0.0))
         else:
-            sign = jnp.prod(jnp.sign(diag))
+            sign = jnp.prod(unit_phase(diag))
             lad = jnp.sum(jnp.log(jnp.abs(diag)))
         return sign, lad
 

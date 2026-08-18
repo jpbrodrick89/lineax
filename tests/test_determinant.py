@@ -507,3 +507,216 @@ def test_slogdet_jvp_jvp(solver, tags, getkey):
     assert jnp.allclose(dot2_lx, dot2_jax, atol=1e-6), (
         f"jvp_jvp {dot2_lx} vs jax {dot2_jax}"
     )
+
+
+def _structured_case(kind, n, key, complex_):
+    """(operator, tangent_operator, solver) for each structure with a fast JVP."""
+    dtype = jnp.complex128 if complex_ else jnp.float64
+
+    def rand(*shape):
+        out = jr.normal(key if not complex_ else jr.split(key)[0], shape, dtype=dtype)
+        return out
+
+    keys = jr.split(key, 8)
+    if kind == "diagonal":
+        make = lx.DiagonalLinearOperator
+        args = lambda k: (jr.normal(k, (n,), dtype=dtype) + 4.0,)  # noqa: E731
+        solver = lx.Diagonal(well_posed=True)
+    elif kind == "tridiagonal":
+        make = lx.TridiagonalLinearOperator
+        args = lambda k: (  # noqa: E731
+            jr.normal(jr.split(k)[0], (n,), dtype=dtype) + 4.0,
+            jr.normal(jr.split(k)[1], (n - 1,), dtype=dtype) * 0.3,
+            jr.normal(k, (n - 1,), dtype=dtype) * 0.3,
+        )
+        solver = lx.Tridiagonal()
+    elif kind == "circulant":
+        make = lx.CirculantLinearOperator
+        args = lambda k: (  # noqa: E731
+            jr.normal(k, (n,), dtype=dtype).at[0].add(n),
+        )
+        solver = lx.Circulant(well_posed=True)
+    elif kind == "triangular":
+
+        def make(matrix):
+            return lx.MatrixLinearOperator(matrix, lx.lower_triangular_tag)
+
+        args = lambda k: (  # noqa: E731
+            jnp.tril(jr.normal(k, (n, n), dtype=dtype)) + 4.0 * jnp.eye(n, dtype=dtype),
+        )
+        solver = lx.Triangular()
+    elif kind == "tridiagonal_tagged":
+        # A dense matrix that merely *promises* to be tridiagonal: the fast path has to
+        # reach it through `tridiagonal(...)`, including on the tangent operator.
+        def make(matrix):
+            return lx.MatrixLinearOperator(matrix, lx.tridiagonal_tag)
+
+        def args(k):
+            k0, k1, k2 = jr.split(k, 3)
+            d = jr.normal(k0, (n,), dtype=dtype) + 4.0
+            lo = jr.normal(k1, (n - 1,), dtype=dtype) * 0.3
+            up = jr.normal(k2, (n - 1,), dtype=dtype) * 0.3
+            return (jnp.diag(d) + jnp.diag(lo, -1) + jnp.diag(up, 1),)
+
+        solver = lx.Tridiagonal()
+    else:
+        raise AssertionError(kind)
+    return make(*args(keys[0])), make(*args(keys[1])), solver
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["diagonal", "triangular", "tridiagonal", "tridiagonal_tagged", "circulant"],
+)
+@pytest.mark.parametrize("complex_", [False, True])
+def test_slogdet_structured_jvp(kind, complex_, getkey):
+    """Structured operators take a fast JVP path; it must match `trace(A^-1 dA)`.
+
+    `lx.slogdet`'s generic rule solves once per column of the tangent. For operators
+    whose determinant is a cheap pure-JAX function of their structure we differentiate
+    that function instead, which is O(n) (O(n log n) for circulant). This checks the
+    two agree, on the sign as well as the log-magnitude -- the sign tangent is only
+    nonzero in the complex case, and is where `jnp.sign` would silently give zero.
+    """
+    n = 32
+    op, t_op, solver = _structured_case(kind, n, getkey(), complex_)
+    (sign, lad), (sign_dot, lad_dot) = jax.jvp(
+        lambda o: lx.slogdet(o, solver), (op,), (t_op,)
+    )
+    matrix = op.as_matrix()
+    t_matrix = t_op.as_matrix()
+    ref_sign, ref_lad = jnp.linalg.slogdet(matrix)
+    trace = jnp.trace(jnp.linalg.solve(matrix, t_matrix))
+    ref_lad_dot = jnp.real(trace)
+    if complex_:
+        # The sign carries the imaginary part of the trace; cast explicitly, as lineax
+        # runs under strict dtype promotion.
+        ref_sign_dot = (trace - ref_lad_dot.astype(trace.dtype)) * ref_sign
+    else:
+        ref_sign_dot = jnp.zeros_like(sign)
+    assert jnp.allclose(sign, ref_sign, atol=1e-10)
+    assert jnp.allclose(lad, ref_lad, rtol=1e-10)
+    assert jnp.allclose(lad_dot, ref_lad_dot, rtol=1e-8)
+    assert jnp.allclose(sign_dot, ref_sign_dot, atol=1e-8)
+
+
+@pytest.mark.parametrize("kind", ["diagonal", "tridiagonal", "circulant"])
+def test_slogdet_structured_jvp_is_not_quadratic(kind, getkey):
+    """The fast JVP must not materialise the tangent densely.
+
+    The generic rule is O(n**2) in both work and memory -- at n = 65536 it needs a
+    34GB tangent -- so a regression here is a memory blow-up rather than a slowdown.
+    Differentiating at a size whose dense tangent would not fit checks the fast path
+    is really being taken.
+    """
+    n = 100_000
+    op, t_op, solver = _structured_case(kind, n, getkey(), False)
+    _, (_, lad_dot) = jax.jvp(lambda o: lx.slogdet(o, solver), (op,), (t_op,))
+    assert jnp.isfinite(lad_dot)
+
+
+def test_slogdet_pseudodeterminant_jvp(getkey):
+    """A rank-deficient solver computes a pseudodeterminant, a different function.
+
+    The fast path differentiates whatever the solver computes, so it needs no rank
+    guard: `Diagonal(well_posed=False)` masks small entries and its tangent masks the
+    same ones. This pins that, since getting it wrong would silently differentiate the
+    full determinant of a singular operator.
+    """
+    diag = jnp.array([2.0, 3.0, 0.0, 5.0])
+    t_diag = jnp.array([1.0, 1.0, 1.0, 1.0])
+    op = lx.DiagonalLinearOperator(diag)
+    t_op = lx.DiagonalLinearOperator(t_diag)
+    solver = lx.Diagonal(well_posed=False)
+    (_, lad), (_, lad_dot) = jax.jvp(lambda o: lx.slogdet(o, solver), (op,), (t_op,))
+    # Pseudodeterminant over the nonzero entries: 2 * 3 * 5, and its tangent
+    # sum(t / d) over those same entries.
+    assert jnp.allclose(lad, jnp.log(30.0))
+    assert jnp.allclose(lad_dot, 1 / 2 + 1 / 3 + 1 / 5)
+
+
+def test_slogdet_structured_jvp_nonflat_structure(getkey):
+    """`is_tridiagonal` does not imply a flat in/out structure, and need not.
+
+    A pytree-structured operator can carry the tag; `tridiagonal(...)` ravels it, so
+    the fast path applies there too. (`try_structured_materialise` guards on flatness
+    for a different reason: `TridiagonalLinearOperator` cannot represent a pytree.)
+    """
+    matrix = jnp.diag(jnp.array([3.0, 4.0, 5.0, 6.0]))
+    matrix += jnp.diag(jnp.array([0.1, 0.2, 0.3]), -1)
+    matrix += jnp.diag(jnp.array([0.4, 0.5, 0.6]), 1)
+    t_matrix = jnp.arange(16.0).reshape(4, 4) * jnp.where(
+        jnp.abs(jnp.arange(4)[:, None] - jnp.arange(4)[None, :]) <= 1, 1.0, 0.0
+    )
+
+    struct = {
+        "a": jax.ShapeDtypeStruct((2,), jnp.float64),
+        "b": jax.ShapeDtypeStruct((2,), jnp.float64),
+    }
+
+    def to_pytree(m):
+        return {
+            "a": {"a": m[:2, :2], "b": m[:2, 2:]},
+            "b": {"a": m[2:, :2], "b": m[2:, 2:]},
+        }
+
+    def make(m):
+        return lx.PyTreeLinearOperator(to_pytree(m), struct, lx.tridiagonal_tag)
+
+    op, t_op = make(matrix), make(t_matrix)
+    assert not isinstance(op.in_structure(), jax.ShapeDtypeStruct)
+    (_, lad), (_, lad_dot) = jax.jvp(
+        lambda o: lx.slogdet(o, lx.Tridiagonal()), (op,), (t_op,)
+    )
+    _, ref_lad = jnp.linalg.slogdet(matrix)
+    ref_dot = jnp.trace(jnp.linalg.solve(matrix, t_matrix))
+    assert jnp.allclose(lad, ref_lad, rtol=1e-10)
+    assert jnp.allclose(lad_dot, ref_dot, rtol=1e-8)
+
+
+@pytest.mark.parametrize("lower", [True, False])
+def test_slogdet_unit_diagonal_jvp(lower):
+    """A unit diagonal pins the determinant to 1 *for a triangular operator*.
+
+    The solver honours the promise rather than reading the stored diagonal, so the
+    fast path must too -- and must not extend the reasoning to operators that merely
+    happen to have ones on the diagonal.
+    """
+    matrix = jnp.array([[1.0, 0.0], [3.0, 1.0]])
+    t_matrix = jnp.array([[5.0, 0.0], [7.0, 11.0]])
+    if not lower:
+        matrix, t_matrix = matrix.T, t_matrix.T
+    tag = (lx.lower_triangular_tag, lx.unit_diagonal_tag)
+    if not lower:
+        tag = (lx.upper_triangular_tag, lx.unit_diagonal_tag)
+    op = lx.MatrixLinearOperator(matrix, tag)
+    t_op = lx.MatrixLinearOperator(t_matrix, tag)
+    (sign, lad), (sign_dot, lad_dot) = jax.jvp(
+        lambda o: lx.slogdet(o, lx.Triangular()), (op,), (t_op,)
+    )
+    assert jnp.allclose(sign, 1.0)
+    assert jnp.allclose(lad, 0.0)
+    assert jnp.allclose(sign_dot, 0.0)
+    assert jnp.allclose(lad_dot, 0.0)
+
+
+def test_slogdet_pseudodeterminant_complex_sign_jvp():
+    """The masked pseudodeterminant's *sign* also has a tangent, for complex operators.
+
+    `jnp.sign` reports a zero tangent, which is right for real inputs and wrong for
+    complex ones, so this path needs `unit_phase` as much as the full-rank one does.
+    """
+    diag = jnp.array([2.0 + 1.0j, 3.0 - 2.0j, 0.0 + 0.0j, 5.0 + 4.0j])
+    t_diag = jnp.array([1.0 + 1.0j, 1.0 - 1.0j, 1.0 + 0.0j, 1.0 + 2.0j])
+    op = lx.DiagonalLinearOperator(diag)
+    t_op = lx.DiagonalLinearOperator(t_diag)
+    solver = lx.Diagonal(well_posed=False)
+    (sign, _), (sign_dot, lad_dot) = jax.jvp(
+        lambda o: lx.slogdet(o, solver), (op,), (t_op,)
+    )
+    # Over the three retained entries, d log(det) = sum(t / d); the real part is the
+    # tangent of log|det| and the rest turns the phase.
+    kept = jnp.array([0, 1, 3])
+    trace = jnp.sum(t_diag[kept] / diag[kept])
+    assert jnp.allclose(lad_dot, jnp.real(trace))
+    assert jnp.allclose(sign_dot, (trace - jnp.real(trace).astype(trace.dtype)) * sign)
