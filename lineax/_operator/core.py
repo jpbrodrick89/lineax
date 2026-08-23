@@ -59,6 +59,7 @@ from .base import (
     FlatPyTree,
     has_real_dtype,
     has_unit_diagonal,
+    in_dtype,
     inexact_structure,
     is_circulant,
     is_diagonal,
@@ -71,7 +72,6 @@ from .base import (
     is_upper_triangular,
     linearise,
     materialise,
-    ones_diagonal,
     tridiagonal,
     tridiagonal_via_coloring,
 )
@@ -674,7 +674,7 @@ def _(operator):
 @diagonal.register(FunctionLinearOperator)
 def _(operator):
     if has_unit_diagonal(operator):
-        return ones_diagonal(operator)
+        return jnp.ones(operator.in_size(), dtype=in_dtype(operator))
     if is_diagonal(operator):
         return diagonal_via_mv(operator)
     return diagonal(materialise(operator))

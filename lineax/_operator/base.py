@@ -373,18 +373,10 @@ def in_dtype(operator: AbstractLinearOperator) -> jnp.dtype:
             return jnp.result_type(*leaves)
 
 
-def ones_diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
-    """A vector of ones, of the size and dtype of `operator`'s diagonal.
-
-    Valid whenever `has_unit_diagonal(operator)` is `True`.
-    """
-    return jnp.ones(operator.in_size(), dtype=in_dtype(operator))
-
-
 def diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
     """Extracts the diagonal via a single `operator.mv` against a vector of ones.
 
-    Valid whenever `is_diagonal(operator)` is `True`.
+    Valid whenever `is_diagonal(operator)`.
     """
     with jax.ensure_compile_time_eval():
         basis = jtu.tree_map(
@@ -396,10 +388,10 @@ def diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
 
 
 def tridiagonal_via_coloring(operator: AbstractLinearOperator):
-    """Extracts the tridiagonal bands via three `vmap`-ed `operator.mv` calls, one
-    per 3-colouring of the input, so that no two same-coloured entries interact.
+    """Extracts the tridiagonal bands via three `vmap`-ed `operator.mv` calls,
+    according to a 3-colouring of the input.
 
-    Valid whenever `is_tridiagonal(operator)` is `True`.
+    Valid whenever `is_tridiagonal(operator)`.
     """
     with jax.ensure_compile_time_eval():
         flat, unravel = strip_weak_dtype(

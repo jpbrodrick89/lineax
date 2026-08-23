@@ -14,6 +14,7 @@
 
 import enum
 from collections.abc import Iterable
+from typing import TypeAlias
 
 import equinox as eqx
 import equinox.internal as eqxi
@@ -49,6 +50,7 @@ from .base import (
     first_column,
     has_real_dtype,
     has_unit_diagonal,
+    in_dtype,
     is_circulant,
     is_diagonal,
     is_hermitian,
@@ -61,7 +63,6 @@ from .base import (
     linearise,
     materialise,
     max_rank,
-    ones_diagonal,
     tridiagonal,
     tridiagonal_via_coloring,
 )
@@ -271,23 +272,21 @@ def _(operator):
     return TaggedLinearOperator(materialise(operator.operator), operator.tags)
 
 
-_opaque_operator_types = (FunctionLinearOperator, JacobianLinearOperator)
+_OpaqueOperator: TypeAlias = FunctionLinearOperator | JacobianLinearOperator
 
 
 @diagonal.register(TaggedLinearOperator)
 def _(operator):
     if has_unit_diagonal(operator):
-        return ones_diagonal(operator)
-    if is_diagonal(operator) and isinstance(operator.operator, _opaque_operator_types):
+        return jnp.ones(operator.in_size(), dtype=in_dtype(operator))
+    if is_diagonal(operator) and isinstance(operator.operator, _OpaqueOperator):
         return diagonal_via_mv(operator)
     return diagonal(operator.operator)
 
 
 @tridiagonal.register(TaggedLinearOperator)
 def _(operator):
-    if is_tridiagonal(operator) and isinstance(
-        operator.operator, _opaque_operator_types
-    ):
+    if is_tridiagonal(operator) and isinstance(operator.operator, _OpaqueOperator):
         return tridiagonal_via_coloring(operator)
     return tridiagonal(operator.operator)
 
