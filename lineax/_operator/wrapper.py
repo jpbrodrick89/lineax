@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
+import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
@@ -26,6 +27,7 @@ from jaxtyping import (
     ScalarLike,
 )
 
+from .._misc import strip_weak_dtype
 from .._tags import (
     circulant_tag,
     diagonal_tag,
@@ -269,6 +271,13 @@ def _(operator):
 
 @diagonal.register(TaggedLinearOperator)
 def _(operator):
+    # Checked here (rather than left to the wrapped operator) since `unit_diagonal_tag`
+    # may have been applied to `operator` without the wrapped operator knowing about it.
+    if has_unit_diagonal(operator):
+        flat, _ = strip_weak_dtype(
+            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
+        )
+        return jnp.ones(flat.size, dtype=flat.dtype)
     return diagonal(operator.operator)
 
 

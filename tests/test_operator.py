@@ -254,6 +254,108 @@ def test_tridiagonal(dtype, getkey):
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_diagonal_composed(dtype, getkey):
+    size = 5
+
+    def make_dense(tags=()):
+        matrix = jr.normal(getkey(), (size, size), dtype=dtype)
+        return lx.MatrixLinearOperator(matrix, tags), matrix
+
+    def tag(operator, matrix, t):
+        return lx.TaggedLinearOperator(operator, t), matrix
+
+    def check(op1, matrix1, op2, matrix2):
+        composed_matrix = matrix1 @ matrix2
+        assert jnp.allclose(lx.diagonal(op1 @ op2), jnp.diag(composed_matrix))
+        assert jnp.allclose(lx.trace(op1 @ op2), jnp.trace(composed_matrix))
+
+    # diagonal @ anything, and anything @ diagonal (not just diagonal @ diagonal)
+    diag_matrix = jr.normal(getkey(), (size,), dtype=dtype)
+    diag_op = lx.DiagonalLinearOperator(diag_matrix)
+    diag_matrix = jnp.diag(diag_matrix)
+    dense_op, dense_matrix = make_dense()
+    check(diag_op, diag_matrix, dense_op, dense_matrix)
+    check(dense_op, dense_matrix, diag_op, diag_matrix)
+
+    def make_triangular(triangularise, t):
+        matrix = triangularise(jr.normal(getkey(), (size, size), dtype=dtype))
+        return tag(lx.MatrixLinearOperator(matrix), matrix, t)
+
+    # same-orientation triangular @ triangular
+    lower_op, lower_matrix = make_triangular(jnp.tril, lx.lower_triangular_tag)
+    lower_op2, lower_matrix2 = make_triangular(jnp.tril, lx.lower_triangular_tag)
+    check(lower_op, lower_matrix, lower_op2, lower_matrix2)
+
+    upper_op, upper_matrix = make_triangular(jnp.triu, lx.upper_triangular_tag)
+    upper_op2, upper_matrix2 = make_triangular(jnp.triu, lx.upper_triangular_tag)
+    check(upper_op, upper_matrix, upper_op2, upper_matrix2)
+
+    # mixed-orientation triangular @ triangular: falls back to materialising, but
+    # should still be correct
+    check(lower_op, lower_matrix, upper_op, upper_matrix)
+
+    # circulant @ circulant: the zero-FFT `cyclic_reverse` identity
+    column1 = jr.normal(getkey(), (size,), dtype=dtype)
+    column2 = jr.normal(getkey(), (size,), dtype=dtype)
+    i, j = jnp.ogrid[:size, :size]
+    circulant_matrix1 = column1[(i - j) % size]
+    circulant_matrix2 = column2[(i - j) % size]
+    circulant_op1 = lx.CirculantLinearOperator(column1)
+    circulant_op2 = lx.CirculantLinearOperator(column2)
+    check(circulant_op1, circulant_matrix1, circulant_op2, circulant_matrix2)
+
+    # tridiagonal @ anything, and anything @ tridiagonal (not just tridiagonal @
+    # diagonal, which `test_tridiagonal` already covers)
+    tridiag_matrix = jr.normal(getkey(), (size, size), dtype=dtype)
+    tridiag_diag = jnp.diag(tridiag_matrix)
+    tridiag_lower = jnp.diag(tridiag_matrix, k=-1)
+    tridiag_upper = jnp.diag(tridiag_matrix, k=1)
+    tridiag_matrix = (
+        jnp.diag(tridiag_diag)
+        + jnp.diag(tridiag_lower, k=-1)
+        + jnp.diag(tridiag_upper, k=1)
+    )
+    tridiag_op = lx.TridiagonalLinearOperator(tridiag_diag, tridiag_lower, tridiag_upper)
+    check(tridiag_op, tridiag_matrix, dense_op, dense_matrix)
+    check(dense_op, dense_matrix, tridiag_op, tridiag_matrix)
+
+
+@pytest.mark.parametrize("make_operator", make_operators)
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_trace(make_operator, dtype, getkey):
+    if (
+        make_operator is make_trivial_diagonal_operator
+        or make_operator is make_identity_operator
+    ):
+        matrix = jnp.eye(3, dtype=dtype)
+        tags = lx.diagonal_tag
+    elif make_operator is make_tridiagonal_operator:
+        matrix = jnp.eye(3, dtype=dtype)
+        tags = lx.tridiagonal_tag
+    elif make_operator is make_circulant_operator:
+        column = jr.normal(getkey(), (3,), dtype=dtype)
+        i, j = jnp.ogrid[:3, :3]
+        matrix = column[(i - j) % 3]
+        tags = lx.circulant_tag
+    else:
+        matrix = jr.normal(getkey(), (3, 3), dtype=dtype)
+        tags = ()
+    if make_operator is make_jacrev_operator and dtype is jnp.complex128:
+        # JacobianLinearOperator does not support complex dtypes when jac="bwd"
+        return
+    operator = make_operator(getkey, matrix, tags)
+    assert jnp.allclose(lx.trace(operator), jnp.trace(matrix))
+    assert jnp.allclose(lx.trace(operator), jnp.sum(lx.diagonal(operator)))
+
+
+def test_trace_is_not_singledispatch():
+    # `trace` is documented as `jnp.sum(diagonal(operator))` and nothing more, with
+    # all fast paths belonging in `diagonal` -- so it should stay a plain function,
+    # not a `functools.singledispatch` one (which would expose a `.register` method).
+    assert not hasattr(lx.trace, "register")
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_first_column(dtype, getkey):
     column = jr.normal(getkey(), (5,), dtype=dtype)
     i, j = jnp.ogrid[:5, :5]
