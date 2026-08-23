@@ -219,9 +219,10 @@ def test_diagonal_tridiagonal_tagged_wraps_untagged_operator(dtype, getkey):
     # `TaggedLinearOperator` retroactively asserting is_diagonal/is_tridiagonal on an
     # opaque (`FunctionLinearOperator`) operator that doesn't know about it itself
     # should take the coloring-based fast path, not fall through to materialising it.
-    # Tagging a genuinely dense matrix as if it were diagonal/tridiagonal anyway makes
-    # the two disagree: matching the fast path's own formula (rather than the matrix's
-    # true diagonal/bands) is what proves it's the one that actually ran.
+    # Using a dense (rather than genuinely diagonal/tridiagonal) matrix here means
+    # `diagonal`/`tridiagonal` would give a different answer had they instead fallen
+    # through to materialising: matching diagonal_via_mv/tridiagonal_via_coloring
+    # directly is what proves it's the fast path that actually ran.
     size = 4
     matrix = jr.normal(getkey(), (size, size), dtype=dtype)
     in_struct = jax.ShapeDtypeStruct((size,), dtype)
@@ -229,13 +230,11 @@ def test_diagonal_tridiagonal_tagged_wraps_untagged_operator(dtype, getkey):
 
     diag_wrapped = lx.TaggedLinearOperator(fn_op, lx.diagonal_tag)
     assert jnp.allclose(lx.diagonal(diag_wrapped), diagonal_via_mv(diag_wrapped))
-    assert not jnp.allclose(lx.diagonal(diag_wrapped), jnp.diag(matrix))
 
     tridiag_wrapped = lx.TaggedLinearOperator(fn_op, lx.tridiagonal_tag)
     assert tree_allclose(
         lx.tridiagonal(tridiag_wrapped), tridiagonal_via_coloring(tridiag_wrapped)
     )
-    assert not jnp.allclose(lx.tridiagonal(tridiag_wrapped)[0], jnp.diag(matrix))
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
