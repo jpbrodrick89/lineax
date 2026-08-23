@@ -368,9 +368,13 @@ def _ones_diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
 
     Valid whenever `has_unit_diagonal(operator)` is `True`.
     """
-    flat, _ = strip_weak_dtype(
-        eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
-    )
+    # `jax.numpy_dtype_promotion("standard")`, as with `_identity_dtype`: the input
+    # structure may have leaves of genuinely different dtypes, and `ravel_pytree`
+    # would otherwise defer to the ambient (possibly `"strict"`) promotion setting.
+    with jax.numpy_dtype_promotion("standard"):
+        flat, _ = strip_weak_dtype(
+            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
+        )
     return jnp.ones(flat.size, dtype=flat.dtype)
 
 

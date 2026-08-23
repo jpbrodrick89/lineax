@@ -775,6 +775,22 @@ def test_identity_diagonal_dtype(dtype):
     assert operator.as_matrix().dtype == dtype
 
 
+def test_unit_diagonal_mixed_dtype_structure():
+    # `_ones_diagonal` (the has_unit_diagonal fast path in `diagonal`) must promote
+    # across leaves the same way `IdentityLinearOperator` does, or this blows up under
+    # strict dtype promotion: `ravel_pytree` alone defers to the ambient promotion
+    # rule, which this project's own test suite sets to "strict".
+    in_struct = {
+        "a": jax.ShapeDtypeStruct((2,), jnp.float32),
+        "b": jax.ShapeDtypeStruct((3,), jnp.float64),
+    }
+    operator = lx.TaggedLinearOperator(
+        lx.FunctionLinearOperator(lambda x: x, in_struct), lx.unit_diagonal_tag
+    )
+    assert jnp.allclose(lx.diagonal(operator), jnp.ones(5))
+    assert lx.trace(operator) == 5
+
+
 def test_compose_identity_with_different_structures():
     structure1 = (
         jax.ShapeDtypeStruct((), jnp.float32),
