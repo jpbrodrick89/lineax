@@ -19,6 +19,7 @@ import jax.flatten_util as jfu
 import jax.numpy as jnp
 from equinox.internal import ω
 
+from .._misc import cyclic_reverse
 from .base import (
     AbstractLinearOperator,
     conj,
@@ -185,8 +186,34 @@ def _(operator):
 
 @diagonal.register(ComposedLinearOperator)
 def _(operator):
-    if is_diagonal(operator.operator1) and is_diagonal(operator.operator2):
-        return diagonal(operator.operator1) * diagonal(operator.operator2)
+    op1, op2 = operator.operator1, operator.operator2
+    # If either operand is diagonal, or both face the same triangular direction, then
+    # `(op1 @ op2)_ii` only ever picks up a single term, `op1_ii * op2_ii`.
+    single_term = (
+        is_diagonal(op1)
+        or is_diagonal(op2)
+        or (is_lower_triangular(op1) and is_lower_triangular(op2))
+        or (is_upper_triangular(op1) and is_upper_triangular(op2))
+    )
+    if single_term:
+        return diagonal(op1) * diagonal(op2)
+    if is_circulant(op1) and is_circulant(op2):
+        # Both operators are diagonalised by the same (Fourier) basis, so the diagonal
+        # of their product is constant and can be read off without ever forming the
+        # product or taking an FFT: `(C1 @ C2)_ii = dot(c1, cyclic_reverse(c2))` for
+        # every `i`, where `c1`, `c2` are the first columns of `C1`, `C2`.
+        c1 = first_column(op1)
+        c2 = first_column(op2)
+        return jnp.full(operator.in_size(), jnp.dot(c1, cyclic_reverse(c2)))
+    if is_tridiagonal(op1) or is_tridiagonal(op2):
+        # If either operand is tridiagonal, then `(op1 @ op2)_ii` only picks up
+        # contributions from the shared tridiagonal band of both operators.
+        main1, lower1, upper1 = tridiagonal(op1)
+        main2, lower2, upper2 = tridiagonal(op2)
+        diag = main1 * main2
+        diag = diag.at[1:].add(lower1 * upper2)
+        diag = diag.at[:-1].add(upper1 * lower2)
+        return diag
     return jnp.diag(operator.as_matrix())
 
 

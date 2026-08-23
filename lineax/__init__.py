@@ -47,6 +47,7 @@ from ._operator import (
     PyTreeLinearOperator as PyTreeLinearOperator,
     TaggedLinearOperator as TaggedLinearOperator,
     TangentLinearOperator as TangentLinearOperator,
+    trace as trace,
     tridiagonal as tridiagonal,
     TridiagonalLinearOperator as TridiagonalLinearOperator,
 )

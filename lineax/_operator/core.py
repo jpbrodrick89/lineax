@@ -670,6 +670,11 @@ def _(operator):
 @diagonal.register(JacobianLinearOperator)
 @diagonal.register(FunctionLinearOperator)
 def _(operator):
+    if has_unit_diagonal(operator):
+        flat, _ = strip_weak_dtype(
+            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
+        )
+        return jnp.ones(flat.size, dtype=flat.dtype)
     if is_diagonal(operator):
         with jax.ensure_compile_time_eval():
             basis = jtu.tree_map(

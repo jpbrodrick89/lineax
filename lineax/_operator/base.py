@@ -28,6 +28,7 @@ from jaxtyping import (
     Array,
     Inexact,
     PyTree,  # pyright: ignore
+    Scalar,
     Shaped,
 )
 
@@ -380,6 +381,15 @@ def diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
     function ensures that you always get the most efficient implementation.
     """
     _default_not_implemented("diagonal", operator)
+
+
+def trace(operator: AbstractLinearOperator) -> Scalar:
+    """Computes the trace of a linear operator.
+
+    Shorthand for `jnp.sum(diagonal(operator))`: all the fast paths (for structured
+    or composed operators) live in [`lineax.diagonal`][], not here.
+    """
+    return jnp.sum(diagonal(operator))
 
 
 @ft.singledispatch
