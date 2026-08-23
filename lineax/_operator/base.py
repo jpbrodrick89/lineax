@@ -363,22 +363,25 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     _default_not_implemented("materialise", operator)
 
 
-def _ones_diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
+def in_dtype(operator: AbstractLinearOperator) -> jnp.dtype:
+    """The dtype of `operator`'s entries, as promoted across its input structure."""
+    leaves = jtu.tree_leaves(operator.in_structure())
+    with jax.numpy_dtype_promotion("standard"):
+        if len(leaves) == 0:
+            return default_floating_dtype()
+        else:
+            return jnp.result_type(*leaves)
+
+
+def ones_diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
     """A vector of ones, of the size and dtype of `operator`'s diagonal.
 
     Valid whenever `has_unit_diagonal(operator)` is `True`.
     """
-    # `jax.numpy_dtype_promotion("standard")`, as with `_identity_dtype`: the input
-    # structure may have leaves of genuinely different dtypes, and `ravel_pytree`
-    # would otherwise defer to the ambient (possibly `"strict"`) promotion setting.
-    with jax.numpy_dtype_promotion("standard"):
-        flat, _ = strip_weak_dtype(
-            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
-        )
-    return jnp.ones(flat.size, dtype=flat.dtype)
+    return jnp.ones(operator.in_size(), dtype=in_dtype(operator))
 
 
-def _diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
+def diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
     """Extracts the diagonal via a single `operator.mv` against a vector of ones.
 
     Valid whenever `is_diagonal(operator)` is `True`.
@@ -392,7 +395,7 @@ def _diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]
     return diag
 
 
-def _tridiagonal_via_mv(operator: AbstractLinearOperator):
+def tridiagonal_via_coloring(operator: AbstractLinearOperator):
     """Extracts the tridiagonal bands via three `vmap`-ed `operator.mv` calls, one
     per 3-colouring of the input, so that no two same-coloured entries interact.
 

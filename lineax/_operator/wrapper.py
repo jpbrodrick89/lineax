@@ -41,13 +41,11 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
-    _diagonal_via_mv,
-    _ones_diagonal,
-    _tridiagonal_via_mv,
     AbstractLinearOperator,
     as_frozenset,
     conj,
     diagonal,
+    diagonal_via_mv,
     first_column,
     has_real_dtype,
     has_unit_diagonal,
@@ -63,7 +61,9 @@ from .base import (
     linearise,
     materialise,
     max_rank,
+    ones_diagonal,
     tridiagonal,
+    tridiagonal_via_coloring,
 )
 from .core import FunctionLinearOperator, JacobianLinearOperator
 
@@ -277,9 +277,9 @@ _opaque_operator_types = (FunctionLinearOperator, JacobianLinearOperator)
 @diagonal.register(TaggedLinearOperator)
 def _(operator):
     if has_unit_diagonal(operator):
-        return _ones_diagonal(operator)
+        return ones_diagonal(operator)
     if is_diagonal(operator) and isinstance(operator.operator, _opaque_operator_types):
-        return _diagonal_via_mv(operator)
+        return diagonal_via_mv(operator)
     return diagonal(operator.operator)
 
 
@@ -288,7 +288,7 @@ def _(operator):
     if is_tridiagonal(operator) and isinstance(
         operator.operator, _opaque_operator_types
     ):
-        return _tridiagonal_via_mv(operator)
+        return tridiagonal_via_coloring(operator)
     return tridiagonal(operator.operator)
 
 

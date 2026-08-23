@@ -50,13 +50,11 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
-    _diagonal_via_mv,
-    _ones_diagonal,
-    _tridiagonal_via_mv,
     AbstractLinearOperator,
     as_frozenset,
     conj,
     diagonal,
+    diagonal_via_mv,
     first_column,
     FlatPyTree,
     has_real_dtype,
@@ -73,7 +71,9 @@ from .base import (
     is_upper_triangular,
     linearise,
     materialise,
+    ones_diagonal,
     tridiagonal,
+    tridiagonal_via_coloring,
 )
 from .structured import (
     CirculantLinearOperator,
@@ -674,9 +674,9 @@ def _(operator):
 @diagonal.register(FunctionLinearOperator)
 def _(operator):
     if has_unit_diagonal(operator):
-        return _ones_diagonal(operator)
+        return ones_diagonal(operator)
     if is_diagonal(operator):
-        return _diagonal_via_mv(operator)
+        return diagonal_via_mv(operator)
     return diagonal(materialise(operator))
 
 
@@ -698,7 +698,7 @@ def _(operator):
 @tridiagonal.register(FunctionLinearOperator)
 def _(operator):
     if is_tridiagonal(operator):
-        return _tridiagonal_via_mv(operator)
+        return tridiagonal_via_coloring(operator)
     matrix = operator.as_matrix()
     assert matrix.ndim == 2
     main_diagonal = jnp.diagonal(matrix, offset=0)
