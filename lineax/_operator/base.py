@@ -386,8 +386,9 @@ def diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
 def trace(operator: AbstractLinearOperator) -> Scalar:
     """Computes the trace of a linear operator.
 
-    Shorthand for `jnp.sum(diagonal(operator))`: all the fast paths (for structured
-    or composed operators) live in [`lineax.diagonal`][], not here.
+    Shorthand for `jnp.sum(diagonal(operator))`, not a singledispatch function. We
+    don't attempt special handling of constant diagonal operators here and instead
+    defer to XLA to recognise the broadcast followed by a reduction.
     """
     return jnp.sum(diagonal(operator))
 
