@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import lineax as lx
 import pytest
+from lineax._operator.base import diagonal_via_mv, tridiagonal_via_coloring
 
 from .helpers import (
     make_circulant_operator,
@@ -216,36 +217,25 @@ def test_diagonal(dtype, getkey):
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_diagonal_tridiagonal_tagged_wraps_untagged_operator(dtype, getkey):
     # `TaggedLinearOperator` retroactively asserting is_diagonal/is_tridiagonal on an
-    # operator that doesn't know about it itself (rather than the property being set
-    # at the wrapped operator's own construction time) should still take the fast
-    # path where one exists, for both densely-represented (`MatrixLinearOperator`)
-    # and opaque (`FunctionLinearOperator`) wrapped operators.
+    # opaque (`FunctionLinearOperator`) operator that doesn't know about it itself
+    # should take the coloring-based fast path, not fall through to materialising it.
+    # Tagging a genuinely dense matrix as if it were diagonal/tridiagonal anyway makes
+    # the two disagree: matching the fast path's own formula (rather than the matrix's
+    # true diagonal/bands) is what proves it's the one that actually ran.
     size = 4
     matrix = jr.normal(getkey(), (size, size), dtype=dtype)
-    diag_matrix = jnp.diag(jnp.diag(matrix))
-    tridiag_matrix = (
-        jnp.diag(jnp.diag(matrix))
-        + jnp.diag(jnp.diag(matrix, k=-1), k=-1)
-        + jnp.diag(jnp.diag(matrix, k=1), k=1)
-    )
     in_struct = jax.ShapeDtypeStruct((size,), dtype)
+    fn_op = lx.FunctionLinearOperator(lambda x: matrix @ x, in_struct)
 
-    for base_matrix, tag in (
-        (diag_matrix, lx.diagonal_tag),
-        (tridiag_matrix, lx.tridiagonal_tag),
-    ):
-        for make_bare in (
-            lx.MatrixLinearOperator,
-            lambda m: lx.FunctionLinearOperator(lambda x: m @ x, in_struct),
-        ):
-            wrapped = lx.TaggedLinearOperator(make_bare(base_matrix), tag)
-            if tag is lx.diagonal_tag:
-                assert jnp.allclose(lx.diagonal(wrapped), jnp.diag(base_matrix))
-            else:
-                diag, lower, upper = lx.tridiagonal(wrapped)
-                assert jnp.allclose(diag, jnp.diag(base_matrix))
-                assert jnp.allclose(lower, jnp.diag(base_matrix, k=-1))
-                assert jnp.allclose(upper, jnp.diag(base_matrix, k=1))
+    diag_wrapped = lx.TaggedLinearOperator(fn_op, lx.diagonal_tag)
+    assert jnp.allclose(lx.diagonal(diag_wrapped), diagonal_via_mv(diag_wrapped))
+    assert not jnp.allclose(lx.diagonal(diag_wrapped), jnp.diag(matrix))
+
+    tridiag_wrapped = lx.TaggedLinearOperator(fn_op, lx.tridiagonal_tag)
+    assert tree_allclose(
+        lx.tridiagonal(tridiag_wrapped), tridiagonal_via_coloring(tridiag_wrapped)
+    )
+    assert not jnp.allclose(lx.tridiagonal(tridiag_wrapped)[0], jnp.diag(matrix))
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
@@ -334,47 +324,30 @@ def test_diagonal_composed_triangular(dtype, getkey):
 
     def make_triangular(triangularise, tag):
         matrix = triangularise(jr.normal(getkey(), (size, size), dtype=dtype))
-        return lx.TaggedLinearOperator(lx.MatrixLinearOperator(matrix), tag), matrix
+        return lx.MatrixLinearOperator(matrix, tags=tag), matrix
 
-    def check(op1, matrix1, op2, matrix2):
-        composed_matrix = matrix1 @ matrix2
-        assert tree_allclose(lx.diagonal(op1 @ op2), jnp.diag(composed_matrix))
-        assert tree_allclose(lx.trace(op1 @ op2), jnp.trace(composed_matrix))
+    def check(composed, composed_matrix):
+        assert tree_allclose(lx.diagonal(composed), jnp.diag(composed_matrix))
+        assert tree_allclose(lx.trace(composed), jnp.trace(composed_matrix))
 
     # same-orientation triangular @ triangular
     lower_op, lower_matrix = make_triangular(jnp.tril, lx.lower_triangular_tag)
     lower_op2, lower_matrix2 = make_triangular(jnp.tril, lx.lower_triangular_tag)
-    check(lower_op, lower_matrix, lower_op2, lower_matrix2)
+    check(lower_op @ lower_op2, lower_matrix @ lower_matrix2)
 
     upper_op, upper_matrix = make_triangular(jnp.triu, lx.upper_triangular_tag)
     upper_op2, upper_matrix2 = make_triangular(jnp.triu, lx.upper_triangular_tag)
-    check(upper_op, upper_matrix, upper_op2, upper_matrix2)
+    check(upper_op @ upper_op2, upper_matrix @ upper_matrix2)
 
     # mixed-orientation triangular @ triangular: falls back to materialising, but
     # should still be correct
-    check(lower_op, lower_matrix, upper_op, upper_matrix)
+    check(lower_op @ upper_op, lower_matrix @ upper_matrix)
 
 
 @pytest.mark.parametrize("make_operator", make_operators)
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_trace(make_operator, dtype, getkey):
-    if (
-        make_operator is make_trivial_diagonal_operator
-        or make_operator is make_identity_operator
-    ):
-        matrix = jnp.eye(3, dtype=dtype)
-        tags = lx.diagonal_tag
-    elif make_operator is make_tridiagonal_operator:
-        matrix = jnp.eye(3, dtype=dtype)
-        tags = lx.tridiagonal_tag
-    elif make_operator is make_circulant_operator:
-        column = jr.normal(getkey(), (3,), dtype=dtype)
-        i, j = jnp.ogrid[:3, :3]
-        matrix = column[(i - j) % 3]
-        tags = lx.circulant_tag
-    else:
-        matrix = jr.normal(getkey(), (3, 3), dtype=dtype)
-        tags = ()
+    matrix, tags = _square_matrix_and_tags(make_operator, getkey, dtype)
     if make_operator is make_jacrev_operator and dtype is jnp.complex128:
         # JacobianLinearOperator does not support complex dtypes when jac="bwd"
         return
@@ -774,12 +747,14 @@ def test_unit_diagonal_dtype_matches_untagged(dtype, getkey):
     # operator isn't tagged -- not just agree on values.
     size = 4
     in_struct = jax.ShapeDtypeStruct((size,), dtype)
-    fn_op = lx.FunctionLinearOperator(lambda x: x, in_struct)
-    tagged = lx.TaggedLinearOperator(fn_op, lx.unit_diagonal_tag)
+    tagged = lx.FunctionLinearOperator(
+        lambda x: x, in_struct, tags=lx.unit_diagonal_tag
+    )
+    untagged = lx.FunctionLinearOperator(lambda x: x, in_struct)
     fast_path = lx.diagonal(tagged)
-    untagged = lx.diagonal(fn_op)
-    assert fast_path.dtype == untagged.dtype
-    assert jnp.allclose(fast_path, untagged)
+    slow_path = lx.diagonal(untagged)
+    assert fast_path.dtype == slow_path.dtype
+    assert jnp.allclose(fast_path, slow_path)
 
 
 def test_unit_diagonal_mixed_dtype_structure():
@@ -794,8 +769,8 @@ def test_unit_diagonal_mixed_dtype_structure():
         "a": jax.ShapeDtypeStruct((2,), jnp.float32),
         "b": jax.ShapeDtypeStruct((3,), jnp.float64),
     }
-    operator = lx.TaggedLinearOperator(
-        lx.FunctionLinearOperator(lambda x: x, in_struct), lx.unit_diagonal_tag
+    operator = lx.FunctionLinearOperator(
+        lambda x: x, in_struct, tags=lx.unit_diagonal_tag
     )
     assert jnp.allclose(lx.diagonal(operator), jnp.ones(5))
     assert lx.trace(operator) == 5

@@ -198,10 +198,7 @@ def _(operator):
     if single_term:
         return diagonal(op1) * diagonal(op2)
     if is_circulant(op1) and is_circulant(op2):
-        # Both operators are diagonalised by the same (Fourier) basis, so the diagonal
-        # of their product is constant and can be read off without ever forming the
-        # product or taking an FFT: `(C1 @ C2)_ii = dot(c1, cyclic_reverse(c2))` for
-        # every `i`, where `c1`, `c2` are the first columns of `C1`, `C2`.
+        # `(C1 @ C2)_ii = dot(c1, cyclic_reverse(c2))` for every `i`, with no FFT.
         c1 = first_column(op1)
         c2 = first_column(op2)
         return jnp.full(operator.in_size(), jnp.dot(c1, cyclic_reverse(c2)))
