@@ -50,6 +50,9 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
+    _diagonal_via_mv,
+    _ones_diagonal,
+    _tridiagonal_via_mv,
     AbstractLinearOperator,
     as_frozenset,
     conj,
@@ -671,18 +674,9 @@ def _(operator):
 @diagonal.register(FunctionLinearOperator)
 def _(operator):
     if has_unit_diagonal(operator):
-        flat, _ = strip_weak_dtype(
-            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
-        )
-        return jnp.ones(flat.size, dtype=flat.dtype)
+        return _ones_diagonal(operator)
     if is_diagonal(operator):
-        with jax.ensure_compile_time_eval():
-            basis = jtu.tree_map(
-                lambda s: jnp.ones(s.shape, s.dtype), operator.in_structure()
-            )
-        diag_as_pytree = operator.mv(basis)
-        diag, _ = jfu.ravel_pytree(diag_as_pytree)
-        return diag
+        return _diagonal_via_mv(operator)
     return diagonal(materialise(operator))
 
 
@@ -704,38 +698,7 @@ def _(operator):
 @tridiagonal.register(FunctionLinearOperator)
 def _(operator):
     if is_tridiagonal(operator):
-        with jax.ensure_compile_time_eval():
-            flat, unravel = strip_weak_dtype(
-                eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
-            )
-
-            basis = jnp.zeros((3, flat.size), dtype=flat.dtype)
-            for i in range(3):
-                basis = basis.at[i, i::3].set(1.0)
-
-            basis = jax.vmap(unravel)(basis)
-
-            coloring = jnp.arange(flat.size) % 3
-
-        compressed_as_pytree = jax.vmap(operator.mv)(basis)
-        compressed_flat = jax.vmap(lambda x: jfu.ravel_pytree(x)[0])(
-            compressed_as_pytree
-        )
-
-        # unique_indices propagates through linear_transpose to set unique_indices=True
-        # on the scatter, allowing assignment rather than accumulation.
-        rows = jnp.arange(flat.size)
-        diag = compressed_flat.at[coloring, rows].get(
-            wrap_negative_indices=False, unique_indices=True
-        )
-        lower_diag = compressed_flat.at[coloring[:-1], rows[1:]].get(
-            wrap_negative_indices=False, unique_indices=True
-        )
-        upper_diag = compressed_flat.at[coloring[1:], rows[:-1]].get(
-            wrap_negative_indices=False, unique_indices=True
-        )
-
-        return diag, lower_diag, upper_diag
+        return _tridiagonal_via_mv(operator)
     matrix = operator.as_matrix()
     assert matrix.ndim == 2
     main_diagonal = jnp.diagonal(matrix, offset=0)

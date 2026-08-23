@@ -209,6 +209,47 @@ def test_diagonal(dtype, getkey):
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_diagonal_tagged_wraps_untagged_operator(dtype, getkey):
+    # `TaggedLinearOperator` retroactively asserting a property on an operator that
+    # doesn't know about it itself (rather than the property being set at the wrapped
+    # operator's own construction time) should still take the fast path where one
+    # exists, for both densely-represented and opaque (`FunctionLinearOperator`)
+    # wrapped operators.
+    size = 4
+    matrix = jr.normal(getkey(), (size, size), dtype=dtype)
+    diag_matrix = jnp.diag(jnp.diag(matrix))
+    tridiag_matrix = (
+        jnp.diag(jnp.diag(matrix))
+        + jnp.diag(jnp.diag(matrix, k=-1), k=-1)
+        + jnp.diag(jnp.diag(matrix, k=1), k=1)
+    )
+    in_struct = jax.ShapeDtypeStruct((size,), dtype)
+
+    for base_matrix, tag in (
+        (diag_matrix, lx.diagonal_tag),
+        (tridiag_matrix, lx.tridiagonal_tag),
+    ):
+        for make_bare in (
+            lambda m: lx.MatrixLinearOperator(m),
+            lambda m: lx.FunctionLinearOperator(lambda x: m @ x, in_struct),
+        ):
+            wrapped = lx.TaggedLinearOperator(make_bare(base_matrix), tag)
+            if tag is lx.diagonal_tag:
+                assert jnp.allclose(lx.diagonal(wrapped), jnp.diag(base_matrix))
+            else:
+                diag, lower, upper = lx.tridiagonal(wrapped)
+                assert jnp.allclose(diag, jnp.diag(base_matrix))
+                assert jnp.allclose(lower, jnp.diag(base_matrix, k=-1))
+                assert jnp.allclose(upper, jnp.diag(base_matrix, k=1))
+
+    # has_unit_diagonal, applied via the wrapper rather than at construction time
+    fn_op = lx.FunctionLinearOperator(lambda x: 2.0 * x, in_struct)
+    wrapped = lx.TaggedLinearOperator(fn_op, lx.unit_diagonal_tag)
+    assert jnp.allclose(lx.diagonal(wrapped), jnp.ones(size, dtype))
+    assert jnp.allclose(lx.trace(wrapped), size)
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_tridiagonal(dtype, getkey):
     matrix = jr.normal(getkey(), (5, 5), dtype=dtype)
     matrix_diag = jnp.diag(matrix)
@@ -315,7 +356,9 @@ def test_diagonal_composed(dtype, getkey):
         + jnp.diag(tridiag_lower, k=-1)
         + jnp.diag(tridiag_upper, k=1)
     )
-    tridiag_op = lx.TridiagonalLinearOperator(tridiag_diag, tridiag_lower, tridiag_upper)
+    tridiag_op = lx.TridiagonalLinearOperator(
+        tridiag_diag, tridiag_lower, tridiag_upper
+    )
     check(tridiag_op, tridiag_matrix, dense_op, dense_matrix)
     check(dense_op, dense_matrix, tridiag_op, tridiag_matrix)
 

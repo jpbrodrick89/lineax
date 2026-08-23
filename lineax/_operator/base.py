@@ -363,6 +363,68 @@ def materialise(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     _default_not_implemented("materialise", operator)
 
 
+def _ones_diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
+    """A vector of ones, of the size and dtype of `operator`'s diagonal.
+
+    Valid whenever `has_unit_diagonal(operator)` is `True`.
+    """
+    flat, _ = strip_weak_dtype(
+        eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
+    )
+    return jnp.ones(flat.size, dtype=flat.dtype)
+
+
+def _diagonal_via_mv(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
+    """Extracts the diagonal via a single `operator.mv` against a vector of ones.
+
+    Valid whenever `is_diagonal(operator)` is `True`.
+    """
+    with jax.ensure_compile_time_eval():
+        basis = jtu.tree_map(
+            lambda s: jnp.ones(s.shape, s.dtype), operator.in_structure()
+        )
+    diag_as_pytree = operator.mv(basis)
+    diag, _ = jfu.ravel_pytree(diag_as_pytree)
+    return diag
+
+
+def _tridiagonal_via_mv(operator: AbstractLinearOperator):
+    """Extracts the tridiagonal bands via three `vmap`-ed `operator.mv` calls, one
+    per 3-colouring of the input, so that no two same-coloured entries interact.
+
+    Valid whenever `is_tridiagonal(operator)` is `True`.
+    """
+    with jax.ensure_compile_time_eval():
+        flat, unravel = strip_weak_dtype(
+            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
+        )
+
+        basis = jnp.zeros((3, flat.size), dtype=flat.dtype)
+        for i in range(3):
+            basis = basis.at[i, i::3].set(1.0)
+
+        basis = jax.vmap(unravel)(basis)
+
+        coloring = jnp.arange(flat.size) % 3
+
+    compressed_as_pytree = jax.vmap(operator.mv)(basis)
+    compressed_flat = jax.vmap(lambda x: jfu.ravel_pytree(x)[0])(compressed_as_pytree)
+
+    # unique_indices propagates through linear_transpose to set unique_indices=True
+    # on the scatter, allowing assignment rather than accumulation.
+    rows = jnp.arange(flat.size)
+    diag = compressed_flat.at[coloring, rows].get(
+        wrap_negative_indices=False, unique_indices=True
+    )
+    lower_diag = compressed_flat.at[coloring[:-1], rows[1:]].get(
+        wrap_negative_indices=False, unique_indices=True
+    )
+    upper_diag = compressed_flat.at[coloring[1:], rows[:-1]].get(
+        wrap_negative_indices=False, unique_indices=True
+    )
+    return diag, lower_diag, upper_diag
+
+
 @ft.singledispatch
 def diagonal(operator: AbstractLinearOperator) -> Shaped[Array, " size"]:
     """Extracts the diagonal from a linear operator, and returns a vector.

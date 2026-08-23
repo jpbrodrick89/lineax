@@ -18,7 +18,6 @@ from collections.abc import Iterable
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
-import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
@@ -27,7 +26,6 @@ from jaxtyping import (
     ScalarLike,
 )
 
-from .._misc import strip_weak_dtype
 from .._tags import (
     circulant_tag,
     diagonal_tag,
@@ -43,6 +41,9 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
+    _diagonal_via_mv,
+    _ones_diagonal,
+    _tridiagonal_via_mv,
     AbstractLinearOperator,
     as_frozenset,
     conj,
@@ -64,6 +65,7 @@ from .base import (
     max_rank,
     tridiagonal,
 )
+from .core import FunctionLinearOperator, JacobianLinearOperator
 
 
 class TaggedLinearOperator(AbstractLinearOperator):
@@ -269,20 +271,24 @@ def _(operator):
     return TaggedLinearOperator(materialise(operator.operator), operator.tags)
 
 
+_opaque_operator_types = (FunctionLinearOperator, JacobianLinearOperator)
+
+
 @diagonal.register(TaggedLinearOperator)
 def _(operator):
-    # Checked here (rather than left to the wrapped operator) since `unit_diagonal_tag`
-    # may have been applied to `operator` without the wrapped operator knowing about it.
     if has_unit_diagonal(operator):
-        flat, _ = strip_weak_dtype(
-            eqx.filter_eval_shape(jfu.ravel_pytree, operator.in_structure())
-        )
-        return jnp.ones(flat.size, dtype=flat.dtype)
+        return _ones_diagonal(operator)
+    if is_diagonal(operator) and isinstance(operator.operator, _opaque_operator_types):
+        return _diagonal_via_mv(operator)
     return diagonal(operator.operator)
 
 
 @tridiagonal.register(TaggedLinearOperator)
 def _(operator):
+    if is_tridiagonal(operator) and isinstance(
+        operator.operator, _opaque_operator_types
+    ):
+        return _tridiagonal_via_mv(operator)
     return tridiagonal(operator.operator)
 
 
