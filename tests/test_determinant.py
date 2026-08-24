@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 
 import equinox as eqx
 import jax
@@ -289,8 +288,12 @@ def test_tridiagonal_slogdet_no_overflow():
 def test_tridiagonal_slogdet_badly_scaled(scale, getkey):
     """Uniformly scaled operators: the up-front power-of-two prescale handles these.
 
-    Without it the minors leave float range inside a single block, since they grow
-    or decay by roughly one entry-magnitude per step.
+    Without it the minors leave float range inside a single block, since they grow or
+    decay by roughly one entry-magnitude per step. The extremes here are near the limit
+    of what the prescale can express: it needs an exponent for `sigma`, so it gives up
+    in the outermost binade at each end (see `_prescale`). The moderate scales are the
+    ones a caller is likely to have, and they pass unaided -- the per-block
+    renormalisation alone survives about 1e+-60.
     """
     n = 128
     diagonal = (jr.normal(getkey(), (n,), dtype=jnp.float64) + 4.0) * scale
@@ -473,23 +476,34 @@ def test_tridiagonal_slogdet_implementation_gradients_agree(n, getkey):
             assert jnp.allclose(actual, want, rtol=1e-10)
 
 
-def test_tridiagonal_slogdet_dispatch_is_platform_correct():
-    """The scan belongs on CPU and the tree everywhere else.
+def test_tridiagonal_slogdet_dispatch_is_platform_correct(getkey):
+    """The scan belongs on CPU and the associative reduce everywhere else.
 
     Both implementations are correct, so no comparison of values can see this
-    inverted -- but doing so costs 202x on GPU at n = 8192, and ~2x on CPU. The scan
-    is a `lax.scan` over blocks and so lowers to a while loop; the tree is an
-    unrolled sequence of reductions and has none.
+    inverted -- but doing so costs 202x on GPU at n = 8192, and about 2x on CPU. They
+    do different amounts of arithmetic, though (the reduce multiplies 2x2 matrices
+    where the scan takes two products per step), so the compiled FLOP count identifies
+    which one was chosen without depending on how either happens to be written.
     """
-    n = 64
-    diagonal = jnp.arange(1, n + 1, dtype=jnp.float64)
-    off = jnp.full(n - 1, 0.25, dtype=jnp.float64)
-    op = lx.TridiagonalLinearOperator(diagonal, off, off)
+    n = 1024
+    diagonal = jr.normal(getkey(), (n,), dtype=jnp.float64) + 4.0
+    lower = jr.normal(getkey(), (n - 1,), dtype=jnp.float64) * 0.3
+    upper = jr.normal(getkey(), (n - 1,), dtype=jnp.float64) * 0.3
     solver = lx.Tridiagonal()
-    state = solver.init(op, {})
-    lowered = jax.jit(lambda s: solver.slogdet(s, {})).lower(state).as_text()
-    expected = 1 if jax.default_backend() == "cpu" else 0
-    assert lowered.count("while(") == expected
+    state = solver.init(lx.TridiagonalLinearOperator(diagonal, lower, upper), {})
+
+    dispatched = _flops(lambda s: solver.slogdet(s, {}), state)
+    if dispatched is None:
+        pytest.skip("backend does not report a FLOP count")
+    arrays = (diagonal, lower, upper)
+    scan = _flops(lambda *a: _slogdet_scan(*a)[1], *arrays)
+    reduce_ = _flops(lambda *a: _slogdet_associative_reduce(*a)[1], *arrays)
+    assert scan != reduce_, "the two implementations have become indistinguishable"
+    expected = scan if jax.default_backend() == "cpu" else reduce_
+    # Not exactly equal: `Tridiagonal.slogdet` adds the n = 1 guard around the call.
+    assert abs(dispatched - expected) <= 8, (
+        f"dispatched {dispatched}, scan {scan}, associative reduce {reduce_}"
+    )
 
 
 def test_tridiagonal_slogdet_singular():
@@ -687,6 +701,16 @@ def test_slogdet_jvp_jvp(solver, tags, getkey):
     )
 
 
+def _flops(fn, *args):
+    """Compiled FLOP count, or `None` where the backend does not report one."""
+    analysis = jax.jit(fn).lower(*args).compile().cost_analysis()
+    if analysis is None:
+        return None
+    if isinstance(analysis, list | tuple):
+        analysis = analysis[0]
+    return analysis.get("flops")
+
+
 def _structured_case(kind, n, key, complex_):
     """(operator, tangent_operator, solver) for each structure with a fast JVP."""
     dtype = jnp.complex128 if complex_ else jnp.float64
@@ -774,45 +798,48 @@ def test_slogdet_structured_jvp(kind, complex_, getkey):
 
 
 @pytest.mark.parametrize("use_default_solver", [False, True])
-@pytest.mark.parametrize(
-    "kind",
-    ["diagonal", "tridiagonal", "tridiagonal_tagged", "triangular", "circulant"],
-)
+@pytest.mark.parametrize("kind", ["diagonal", "tridiagonal", "circulant"])
 def test_slogdet_structured_jvp_is_not_quadratic(kind, use_default_solver, getkey):
-    """The fast JVP must not materialise the tangent densely.
+    """The fast JVP must not cost O(n**2).
 
-    The generic rule is O(n**2) in both work and memory -- at n = 65536 it needs a
-    34GB tangent -- so a regression here is a memory blow-up rather than a slowdown.
-    Rather than differentiate at a size whose dense tangent would not fit, which
-    turns a regression into an OOM of the test runner, inspect the jaxpr: if the fast
-    path is taken there is no intermediate of size n**2 anywhere in it.
+    The generic rule solves once per column, in both work and memory -- at n = 65536
+    it needs a 34GB tangent -- so a regression here is a memory blow-up rather than a
+    slowdown. Rather than differentiate at a size whose dense tangent would not fit,
+    which turns a regression into an OOM of the test runner, compare the compiled FLOP
+    count at two sizes: the fast path grows by 1.9x to 2.3x per doubling (n, or
+    n log n for `Circulant`), the generic rule by 4.0x to 4.4x. Both figures are the
+    same on CPU and GPU, so the threshold is not platform-specific tuning.
 
-    `Triangular` and the tag-only tridiagonal are the exceptions -- their operators
-    are dense matrices already -- so they only have to avoid the *second* factor of n.
+    A FLOP count can under-report, since work inside an FFI custom call is opaque to
+    it -- but not here, and not by luck: what makes the generic rule quadratic in this
+    measurement is materialising the dense tangent and carrying n columns through the
+    solve, which is ordinary XLA array traffic. Whatever the solve itself costs is on
+    top of a signal that is already unambiguous. Disabling the fast path fails all six
+    cases.
 
-    `use_default_solver` covers the `AutoLinearSolver` look-through, which nothing
-    else pins: without it the default solver silently falls back to the generic rule.
+    Only structures whose operator is O(n) to store are here. For one held as a dense
+    matrix the operator itself is quadratic, so a growth rate cannot separate the two
+    paths; `Triangular`'s membership of the fast set is pinned semantically by
+    `test_slogdet_unit_diagonal_jvp` instead.
+
+    `use_default_solver` covers the `AutoLinearSolver` look-through, which nothing else
+    pins: without it the default solver silently falls back to the generic rule.
     """
-    n = 64
-    op, t_op, solver = _structured_case(kind, n, getkey(), False)
-    if use_default_solver:
-        solver = None
+    counts = []
+    for n in (128, 256):
+        op, _, solver = _structured_case(kind, n, getkey(), False)
+        if use_default_solver:
+            solver = None
 
-    def slogdet(o):
-        return lx.slogdet(o)[1] if solver is None else lx.slogdet(o, solver)[1]
+        def lad(o, solver=solver):
+            return lx.slogdet(o)[1] if solver is None else lx.slogdet(o, solver)[1]
 
-    jaxpr = jax.make_jaxpr(lambda o, t: jax.jvp(slogdet, (o,), (t,)))(op, t_op)
-    largest = max(
-        math.prod(var.aval.shape)
-        for eqn in jaxpr.eqns
-        for var in eqn.outvars
-        if hasattr(var.aval, "shape")
-    )
-    # `triangular` and `tridiagonal_tagged` are dense operators already, so they can
-    # only be asked to avoid the *second* factor of n.
-    dense = kind in ("triangular", "tridiagonal_tagged")
-    budget = n * n if dense else n
-    assert largest <= budget, f"largest intermediate {largest} > {budget}"
+        flops = _flops(jax.grad(lad), op)
+        if flops is None:
+            pytest.skip("backend does not report a FLOP count")
+        counts.append(flops)
+    growth = counts[1] / counts[0]
+    assert growth < 3.0, f"gradient FLOPs grew {growth:.2f}x per doubling"
 
 
 @pytest.mark.parametrize(
@@ -898,31 +925,67 @@ def test_slogdet_structured_vmap(kind, getkey):
         assert jnp.allclose(actual, want, rtol=1e-10)
 
 
-def test_slogdet_structured_jvp_rebuilds_state(getkey):
-    """A supplied `state` is rebuilt from `operator` on the fast path.
+def test_slogdet_structured_state_is_differentiable(getkey):
+    """For the solvers we differentiate directly, `state` carries the derivative.
 
-    A state is not differentiable, so differentiating a solver's own `slogdet` means
-    re-running `init` on the operator being differentiated. Passing a state that
-    belongs to a *different* operator therefore gives a tangent for `operator` while
-    the generic rule would give one for the state -- and `jax.jvp`'s primal follows
-    the state, so the two disagree. Documented on `lx.slogdet`; pinned here because
-    it is a silent difference in behaviour between the two paths.
+    The state is the thing being differentiated -- the fast rule differentiates the
+    solver's own `slogdet`, whose only input is the state -- so `lx.slogdet` hands it
+    over with its tangent intact rather than stopping it. That keeps a single `init` in
+    the graph, where rebuilding it inside the rule would leave two and lean on the
+    compiler to notice they are the same. Three consequences, each differing from the
+    generic rule:
+
+    1. Not passing a state works as before, the state being built from `operator`.
+    2. Passing one built *inside* the differentiated function differentiates through
+       it, which is the case a caller sharing a factorisation actually has.
+    3. Passing one built outside gives a zero derivative -- correctly, since then the
+       value does not depend on `operator` at all. `jax.jvp`'s primal agrees with the
+       undifferentiated call, which is what makes that self-consistent.
     """
     solver = lx.Diagonal(well_posed=True)
-    operator = lx.DiagonalLinearOperator(jnp.array([2.0, 3.0, 4.0]))
+    diagonal = jnp.array([2.0, 3.0, 4.0])
+    operator = lx.DiagonalLinearOperator(diagonal)
     t_operator = lx.DiagonalLinearOperator(jnp.ones(3))
-    foreign = lx.DiagonalLinearOperator(jnp.array([10.0, 20.0, 30.0]))
-    foreign_state = solver.init(foreign, {})
+    expected = jnp.sum(1.0 / diagonal)
 
-    def lad(o):
-        return lx.slogdet(o, solver, state=foreign_state)[1]
+    primal, tangent = jax.jvp(
+        lambda o: lx.slogdet(o, solver)[1], (operator,), (t_operator,)
+    )
+    assert jnp.allclose(primal, jnp.sum(jnp.log(diagonal)))
+    assert jnp.allclose(tangent, expected)
 
-    # The undifferentiated call honours the state ...
-    assert jnp.allclose(lad(operator), jnp.sum(jnp.log(jnp.array([10.0, 20.0, 30.0]))))
-    # ... while the JVP describes `operator`, primal included.
-    primal, tangent = jax.jvp(lad, (operator,), (t_operator,))
-    assert jnp.allclose(primal, jnp.sum(jnp.log(jnp.array([2.0, 3.0, 4.0]))))
-    assert jnp.allclose(tangent, jnp.sum(1.0 / jnp.array([2.0, 3.0, 4.0])))
+    def shared(o):
+        return lx.slogdet(o, solver, state=solver.init(o, {}))[1]
+
+    primal, tangent = jax.jvp(shared, (operator,), (t_operator,))
+    assert jnp.allclose(primal, jnp.sum(jnp.log(diagonal)))
+    assert jnp.allclose(tangent, expected)
+
+    foreign_diagonal = jnp.array([10.0, 20.0, 30.0])
+    foreign = solver.init(lx.DiagonalLinearOperator(foreign_diagonal), {})
+
+    def with_foreign(o):
+        return lx.slogdet(o, solver, state=foreign)[1]
+
+    primal, tangent = jax.jvp(with_foreign, (operator,), (t_operator,))
+    assert jnp.allclose(primal, with_foreign(operator))
+    assert jnp.allclose(primal, jnp.sum(jnp.log(foreign_diagonal)))
+    assert jnp.allclose(tangent, 0.0)
+
+
+def test_slogdet_generic_state_stays_nondifferentiable():
+    """The guard is lifted only for the solvers that need it.
+
+    Every other solver gets a state that is a factorisation the generic rule merely
+    solves against, where differentiating it would be a mistake rather than the point.
+    """
+    operator = lx.MatrixLinearOperator(jnp.eye(3) * 2.0)
+    t_operator = lx.MatrixLinearOperator(jnp.eye(3))
+    primal, tangent = jax.jvp(
+        lambda o: lx.slogdet(o, lx.LU())[1], (operator,), (t_operator,)
+    )
+    assert jnp.allclose(primal, jnp.sum(jnp.log(jnp.full(3, 2.0))))
+    assert jnp.allclose(tangent, 1.5)
 
 
 def test_slogdet_structured_grad_singular_is_nonfinite():

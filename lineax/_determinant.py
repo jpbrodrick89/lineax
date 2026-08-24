@@ -59,6 +59,34 @@ def _det_sign_error_msg(
     )
 
 
+def _differentiates_slogdet_directly(
+    solver: "AbstractDirectLinearSolver | Normal",
+    operator: AbstractLinearOperator,
+) -> bool:
+    """Whether to differentiate this solver's own `slogdet`, rather than solve.
+
+    These are the solvers that *benefit* from being differentiated through, not merely
+    the ones that can be: `LU` differentiates perfectly well, but differentiating its
+    factorisation costs what the solves it would save cost anyway (A100, float64,
+    within 12% either way at n = 256 and n = 1024). For these four the determinant
+    comes straight from the operator's entries -- a product of the diagonal, a
+    three-term minor recurrence, or an FFT -- so differentiating it is O(n), or
+    O(n log n) for `Circulant` and O(n**2) for `Triangular`, whose operator is a dense
+    matrix in the first place. Against O(n**2) work *and memory* for the generic rule,
+    which needs a 34GB tangent for a float64 tridiagonal operator at n = 65536 and
+    simply runs out. Only add a solver here whose `init` and `slogdet` are pure JAX:
+    `QR` would raise `NotImplementedError` for `geqrf`.
+
+    `slogdet` consults this to decide whether to hand the state to `_slogdet`
+    differentiably, and `_slogdet_jvp` to decide whether to use that. They have to
+    agree: the rule would otherwise differentiate a state that was stopped.
+    """
+    # `AutoLinearSolver` forwards `slogdet` to whatever it selected, so look through it.
+    if isinstance(solver, AutoLinearSolver):
+        solver = solver.select_solver(operator)
+    return isinstance(solver, Diagonal | Triangular | Tridiagonal | Circulant)
+
+
 @eqx.filter_custom_jvp
 def _slogdet(operator, solver, options, state):
     return solver.slogdet(state, options)
@@ -67,33 +95,20 @@ def _slogdet(operator, solver, options, state):
 @_slogdet.def_jvp
 def _slogdet_jvp(primals, tangents):
     operator, solver, options, state = primals
-    t_operator, _, _, _ = tangents
+    t_operator, _, _, t_state = tangents
 
-    # `AutoLinearSolver` forwards `slogdet` to whatever it selected, so look through it.
-    if isinstance(solver, AutoLinearSolver):
-        inner_solver = solver.select_solver(operator)
-    else:
-        inner_solver = solver
-    # These are the solvers that *benefit* from being differentiated through, not merely
-    # the ones that can be: `LU` differentiates perfectly well, but differentiating its
-    # factorisation costs what the solves it would save cost anyway (A100, float64,
-    # within 12% either way at n = 256 and n = 1024). For these four the
-    # determinant comes straight from the operator's entries -- a product of the
-    # diagonal, a three-term minor recurrence, or an FFT -- so differentiating it is
-    # O(n), or O(n log n) for `Circulant` and O(n**2) for `Triangular`, whose operator
-    # is a dense matrix in the first place. Against O(n**2) work *and memory* for the
-    # generic rule below, which needs a 34GB tangent for a float64 tridiagonal operator
-    # at n = 65536 and simply runs out. Only add a solver here whose `init` and
-    # `slogdet` are pure JAX: `QR` would raise `NotImplementedError` for `geqrf`.
-    if isinstance(inner_solver, Diagonal | Triangular | Tridiagonal | Circulant):
-        # `eqx.filter_jvp`, not `jax.jvp`: an operator may carry non-array leaves --
-        # `FunctionLinearOperator.fn` and `JacobianLinearOperator.args` among them --
-        # which `jax.jvp` rejects outright, and `filter_custom_jvp` hands us `None`
-        # tangents for them, which it also cannot consume.
+    if _differentiates_slogdet_directly(solver, operator):
+        # `slogdet` left the state differentiable for exactly this, so the
+        # factorisation is differentiated where it was built, once. Rebuilding it here
+        # instead would leave two of them in the jaxpr and lean on the compiler to
+        # notice they are the same.
+        #
+        # `eqx.filter_jvp`, not `jax.jvp`: a state may carry non-array leaves --
+        # `PackedStructures` among them -- which `jax.jvp` rejects outright, and
+        # `filter_custom_jvp` hands us `None` tangents for them, which it also cannot
+        # consume.
         return eqx.filter_jvp(
-            lambda o: solver.slogdet(solver.init(o, options), options),
-            (operator,),
-            (t_operator,),
+            lambda s: solver.slogdet(s, options), (state,), (t_state,)
         )
 
     sign, lad = solver.slogdet(state, options)
@@ -170,13 +185,23 @@ def slogdet(
                 else jnp.result_type(*leaves)
             )
         return jnp.ones((), dtype=dtype), jnp.zeros((), dtype=dtype)
+    # For the solvers whose own `slogdet` we differentiate, the state is the thing
+    # being differentiated, so it has to reach `_slogdet` with its tangent intact --
+    # both the `stop_gradient` and the `nondifferentiable` guard below would sever it.
+    # For every other solver the state is a factorisation that the generic rule only
+    # solves against, and differentiating it is a mistake we would rather catch.
+    direct = _differentiates_slogdet_directly(solver, operator)
     if state is sentinel:
-        dynamic_op, static_op = eqx.partition(operator, eqx.is_array)
-        stopped_op = eqx.combine(lax.stop_gradient(dynamic_op), static_op)
-        state = solver.init(stopped_op, options)
-    dynamic_state, static_state = eqx.partition(state, eqx.is_array)
-    state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
-    state = eqxi.nondifferentiable(state, name="`lx.slogdet` state")
+        if direct:
+            state = solver.init(operator, options)
+        else:
+            dynamic_op, static_op = eqx.partition(operator, eqx.is_array)
+            stopped_op = eqx.combine(lax.stop_gradient(dynamic_op), static_op)
+            state = solver.init(stopped_op, options)
+    if not direct:
+        dynamic_state, static_state = eqx.partition(state, eqx.is_array)
+        state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
+        state = eqxi.nondifferentiable(state, name="`lx.slogdet` state")
     return _slogdet(operator, solver, options, state)
 
 
