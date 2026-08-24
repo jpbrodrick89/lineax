@@ -131,21 +131,24 @@ Nothing.
 #   * `_slogdet_parallel` rewrites it as a product of 2x2 transfer matrices and
 #     evaluates that product with a tree, which is what GPUs need: there, each
 #     `lax.scan` iteration costs a kernel launch (~8us) whatever the work inside it,
-#     so the sequential form costs ~8us * n / block and is 20x-20000x slower.
+#     so the sequential form costs ~8us * n / block: on an A100 in float64 that is 15x
+#     slower at n = 512, 199x at n = 8192, and 3377x at n = 131072.
 #
 # `Tridiagonal.slogdet` picks between them with `lax.platform_dependent`. `lx.slogdet`'s
 # JVP rule differentiates that, so each platform also reverses the implementation it
-# uses for the primal -- which is what you want: at n = 8192 reverse mode costs 1.2-1.6x
-# the primal for the tree and 3.2-4.9x for the scan, but the scan's primal is cheap
-# enough on CPU that it still wins there (262us against 849us).
+# uses for the primal, which is what you want on both. On GPU the tree's primal
+# advantage decides it. On CPU the scan wins on both counts: in float64 at n = 8192 its
+# primal is 85us against 171us, and its backward pass costs a further 1.4-1.8x against
+# 3.9-12.3x for the tree (reversing a scan is a second serial pass over stored
+# residuals; reversing a tree is another tree, but over much more data).
 # ----------------------------------------------------------------------------------
 
 # Number of raw recurrence steps between renormalisations. Bigger blocks amortise the
 # renormalisation over more steps; smaller blocks let the minors decay further before a
 # block underflows. A block underflows once the minors decay past float range within it,
 # i.e. roughly when R * K > 308 for an operator whose entries span 10**-R, so this caps
-# the tolerated grading. Largest R that both implementations get right, measured over
-# six draws of `test_tridiagonal_slogdet_graded`'s construction at n = 128:
+# the tolerated grading. Largest R that both implementations get right, in float64,
+# over six draws of `test_tridiagonal_slogdet_graded`'s construction at n = 128:
 #
 #     K:                 2     4     8    16    32
 #     sequential:      108    66    38    20    10
@@ -163,17 +166,23 @@ Nothing.
 # per-block decay lands inside the denormal band, so instead of underflowing cleanly
 # to -inf it returns a silently wrong answer (~5e-4 relative) for R in 120..150.
 #
-# 8 would be 1.3x faster again on CPU, but its limit is *exactly* the 40 decades that
-# `test_tridiagonal_slogdet_graded` pins, so there would be no margin at all -- and on
+# 8 would be 1.3x faster again on CPU (float64, every size measured), but its limit of
+# 38 decades sits just below the
+# 40 that `test_tridiagonal_slogdet_graded` pins, so it fails outright -- and on
 # GPU it fails silently rather than underflowing to -inf. It buys nothing there anyway:
 # `_slogdet_parallel` is within noise between 4 and 8 at every size measured, because
 # its launch count is `block + log_radix(n / block)` rather than `n / block`.
 _SLOGDET_BLOCK = 4
 
 # Fan-in of the tree in `_slogdet_parallel`: how many chunk transfer matrices are
-# multiplied together between renormalisations. 4 costs ~25% less than 2 (fewer levels,
-# hence fewer kernel launches) and is within noise of 8 and 16; 2 is slightly more
-# accurate on near-defective operators, if that is ever worth the time.
+# multiplied together between renormalisations, so it only affects `_slogdet_parallel`
+# and hence only GPU. 2 is reliably the slowest (fewer matrices per level means more
+# levels, hence more kernel launches); 4, 8 and 16 land within run-to-run scatter of
+# each other, individual runs disagreeing by ~15% on which is quickest (A100, float64,
+# n = 131072: 64, 49, 42, 48us of device time). 4 is the smallest of those, which is the
+# safe end: fewer products between renormalisations, and radix 2 is ~3x more accurate
+# than 4 on near-defective operators (1.6e-9 against 5.2e-9 relative in float64 at
+# n = 262144) if that ever matters more than speed.
 _SLOGDET_RADIX = 4
 
 
@@ -301,7 +310,8 @@ def _slogdet_sequential(
 #
 # The matrices are carried as four separate arrays rather than one `(m, 2, 2)` array:
 # `a @ b` on stacked 2x2s lowers to a batched `dot_general`, i.e. an unfusable cuBLAS
-# call, which costs up to 32x more at large batch.
+# call. At n = 2048 x batch 4096 in float64 that costs 25.7ms against 2.9-3.5ms for the
+# component-wise form, a 7-9x difference.
 
 
 def _mul(hi: tuple, lo: tuple) -> tuple:
