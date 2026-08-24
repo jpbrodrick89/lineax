@@ -107,6 +107,10 @@ def _slogdet_jvp(primals, tangents):
         # a failed tangent solve has nowhere to pipe an error result, so we surface it
         # loudly rather than silently returning a `nan` gradient. Pseudoinverse solvers
         # (SVD, HEVD, ...) never raise here, so the pseudodeterminant path is unchanged.
+        # This applies to this generic path only: the solvers handled above
+        # differentiate their own `slogdet`, and so return a non-finite gradient for a
+        # singular operator -- where `d log|det A|` genuinely does not exist -- rather
+        # than raising.
         return linear_solve(operator, col, solver, state=state, throw=True).value
 
     # vmap over the n columns of dA; X[i] = A† dA[:,i], trace(A† dA) = trace(X)
@@ -143,7 +147,11 @@ def slogdet(
     - `options`: any extra options to pass to the solver.
     - `state`: if provided, use this pre-computed factorised state instead of
         calling `solver.init`. Allows multiple determinant computations to share
-        the same factorisation.
+        the same factorisation. Note that when differentiating with a solver that
+        supports it directly (see `_slogdet_jvp`), the state is rebuilt from
+        `operator`, since a state is by construction not differentiable; supplying
+        a `state` belonging to a *different* operator therefore gives a derivative
+        that does not match the primal.
 
     **Returns:**
 

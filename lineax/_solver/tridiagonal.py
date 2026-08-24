@@ -160,11 +160,22 @@ Nothing.
 # because a tree group spans exponentially many steps between renormalisations. At
 # K = 4 both paths break at the same R, so the GPU path costs no grading tolerance.
 #
+# Past that limit neither path fails cleanly. A block's minors decay into the denormal
+# range before the renormalisation sees them, losing precision but staying finite, so
+# for a band of R above the limit the result is silently wrong rather than -inf:
+# measured at K = 4, n = 128, `sequential` is wrong by 2.6e-4 to 1.3e-3 relative in
+# `lad` (a factor of e**14 in |det|) for R in 66..79 before underflowing at 80, and
+# `parallel` by ~2e-5 from 66 to past 80. This is inherent to renormalising in blocks
+# and is not specific to K = 4: K = 2 has the same band, at roughly double the R.
+#
+# All of the above is float64. The binding quantity is the exponent range, so float32
+# divides every figure by about eight: at K = 4 the measured limit is 8 decades, with
+# the silently-wrong band at 9 and underflow from 10.
+#
 # 4 is also the smallest value that still beats LAPACK `gttrf` on CPU at every size
-# (1.1-1.5x unbatched, 2.2-3.0x batched). Going to 2 buys tolerance only on CPU, only
-# reaches parity with `gttrf` unbatched, and is *less* safe rather than more: its
-# per-block decay lands inside the denormal band, so instead of underflowing cleanly
-# to -inf it returns a silently wrong answer (~5e-4 relative) for R in 120..150.
+# (1.1-1.5x unbatched, 2.2-3.0x batched). Going to 2 doubles both the limit and the
+# band above it, but only on CPU -- `parallel`'s own ceiling near 68 binds regardless
+# -- and it only reaches parity with `gttrf` unbatched.
 #
 # 8 would be 1.3x faster again on CPU (float64, every size measured), but its limit of
 # 38 decades sits just below the
@@ -180,9 +191,10 @@ _SLOGDET_BLOCK = 4
 # levels, hence more kernel launches); 4, 8 and 16 land within run-to-run scatter of
 # each other, individual runs disagreeing by ~15% on which is quickest (A100, float64,
 # n = 131072: 64, 49, 42, 48us of device time). 4 is the smallest of those, which is the
-# safe end: fewer products between renormalisations, and radix 2 is ~3x more accurate
-# than 4 on near-defective operators (1.6e-9 against 5.2e-9 relative in float64 at
-# n = 262144) if that ever matters more than speed.
+# safe end: fewer products between renormalisations. Accuracy does not appear to
+# distinguish them -- on the near-defective discrete Laplacian at n = 262144, radices
+# 2, 4, 8 and 16 all land on the same 2.0e-12 relative error -- so this is a choice
+# about speed, and about not being at the far end of a range we have not stress-tested.
 _SLOGDET_RADIX = 4
 
 
@@ -202,21 +214,28 @@ def _prescale(
     most 2**block per block -- so the recurrence can no longer overflow at all. This is
     a single reduction, outside the serial loop.
 
+    The rescale itself gives up in the outermost binade at each end of the float range,
+    where `frexp`/`ldexp` cannot represent `sigma`: an operator whose largest entry is
+    at least `2**1023` (`2**127` in float32) needs a subnormal `sigma_inv`, and one
+    whose entries are all subnormal has no exponent for `frexp` to report. Either way
+    the result is non-finite or `-inf` rather than silently wrong, and the platforms
+    disagree about which.
+
     Returns the scaled diagonal, the scaled `coupling` l_i u_i, and log2(sigma).
     """
     dtype = diagonal.dtype
     real_dtype = jnp.finfo(dtype).dtype
     zero = jnp.zeros((), real_dtype)
-    # Take the magnitude from the raw entries rather than from `lower * upper`:
-    # forming that product first overflows to `inf` (and thence `nan`) whenever
-    # |entries| > sqrt(max_float), which is only ~1.8e19 in float32 -- precisely the
-    # badly-scaled operators this rescale exists to handle.
+    # The recurrence's coupling scale is `sqrt(|l u|)`, but forming `lower * upper` to
+    # get it overflows to `inf` (and thence `nan`) once |entries| exceed
+    # sqrt(max_float) -- only ~1.8e19 in float32, precisely the badly-scaled operators
+    # this rescale exists to handle. Take the square roots separately instead: that
+    # never forms the product, and unlike `max(|l|, |u|)` it stays correct when the two
+    # off-diagonals are wildly different sizes (`l = 1e77`, `u = 1e-77` has coupling 1).
     magnitude = jnp.maximum(
         jnp.max(jnp.abs(diagonal), initial=zero),
-        jnp.maximum(
-            jnp.max(jnp.abs(lower_diagonal), initial=zero),
-            jnp.max(jnp.abs(upper_diagonal), initial=zero),
-        ),
+        jnp.sqrt(jnp.max(jnp.abs(lower_diagonal), initial=zero))
+        * jnp.sqrt(jnp.max(jnp.abs(upper_diagonal), initial=zero)),
     )
     _, exponent = jnp.frexp(magnitude)
     sigma_inv = jnp.ldexp(jnp.ones((), real_dtype), -exponent).astype(dtype)
@@ -260,7 +279,12 @@ def _slogdet_sequential(
 
     def block_step(carry, args):
         (prev, curr), _ = lax.scan(unit_step, carry, args, unroll=block)
-        scale = jnp.maximum(jnp.abs(prev), jnp.abs(curr))
+        # `lad` is invariant to `scale`: it divides the minors and is added back as
+        # `log(scale)`, so the two contributions cancel exactly. Differentiating it
+        # anyway costs a `1/scale**2` in reverse mode, which overflows once a block's
+        # scale drops below sqrt(smallest normal) -- halving the grading a *gradient*
+        # tolerates relative to the primal. Stopping it is exact, not an approximation.
+        scale = lax.stop_gradient(jnp.maximum(jnp.abs(prev), jnp.abs(curr)))
         # A singular A drives both minors to exactly zero. Dividing by `scale` would
         # turn that into `nan`; holding the pair at zero instead lets the `log(scale)`
         # sum absorb the `-inf` and yields `(sign, lad) = (0, -inf)`, matching
@@ -325,8 +349,18 @@ def _mul(hi: tuple, lo: tuple) -> tuple:
 def _normalise(m: tuple, log_scale: Array) -> tuple[tuple, Array]:
     """Divide out the largest entry, accumulating its log."""
     a, b, c, d = m
-    scale = jnp.maximum(
-        jnp.maximum(jnp.abs(a), jnp.abs(b)), jnp.maximum(jnp.abs(c), jnp.abs(d))
+    # Exactly as in `_slogdet_sequential`: the scale cancels, so stop it rather than
+    # pay a `1/scale**2` in reverse mode. Here that is a real trade rather than a free
+    # win -- it raises the grading a gradient tolerates from ~52 decades to ~64, so
+    # that the gradient matches the primal, but costs 1.6x in gradient time (A100,
+    # float64, n = 131072: 128us against 210us). Deleting the `stop_gradient` takes the
+    # speed back and reinstates the cliff. Normalising by an exact power of two instead,
+    # whose `frexp` exponent has a structurally zero derivative, gives the same
+    # tolerance for the same 1.6x, so the cost is inherent rather than an artifact.
+    scale = lax.stop_gradient(
+        jnp.maximum(
+            jnp.maximum(jnp.abs(a), jnp.abs(b)), jnp.maximum(jnp.abs(c), jnp.abs(d))
+        )
     )
     # As in `_slogdet_sequential`: hold an exactly-singular block at zero rather than
     # producing `nan`, and let the `-inf` appear in the final log.

@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import lineax as lx
 import pytest
+from lineax._solver.tridiagonal import _slogdet_parallel, _slogdet_sequential
 
 from .helpers import (
     construct_matrix,
@@ -306,9 +307,10 @@ def test_tridiagonal_slogdet_graded(span, getkey):
     """Entries spanning 10**-span within one operator.
 
     The renormalisation block length caps this: a block underflows once the minors
-    decay past float range within it, roughly `span * _SLOGDET_BLOCK > 308`. At
-    `_SLOGDET_BLOCK = 4` that is `span ~ 77`, so 40 has comfortable margin -- but
-    raising the block length to 8 would fail this case.
+    decay past float range within it. At `_SLOGDET_BLOCK = 4` the measured limit is
+    `span ~ 63`, so 40 has comfortable margin -- but raising the block length to 8
+    would drop the limit to 38 and fail this case. See the block comment beside
+    `_SLOGDET_BLOCK`, which also records the silently-wrong band just above the limit.
     """
     n = 128
     grade = 10.0 ** (-span * jnp.arange(n, dtype=jnp.float64) / n)
@@ -322,8 +324,106 @@ def test_tridiagonal_slogdet_graded(span, getkey):
     assert jnp.allclose(lad, ref_lad, rtol=1e-12)
 
 
+def test_tridiagonal_slogdet_graded_float32(getkey):
+    """As `test_tridiagonal_slogdet_graded`, in float32.
+
+    The limit on tolerated grading is set by the exponent range, so float32 divides it
+    by about eight: 8 decades rather than 63 at `_SLOGDET_BLOCK = 4`. 5 leaves margin.
+    """
+    n = 128
+    span = 5.0
+    grade = (10.0 ** (-span * jnp.arange(n, dtype=jnp.float32) / n)).astype(jnp.float32)
+    diagonal = (jr.normal(getkey(), (n,), dtype=jnp.float32) + 4.0) * grade
+    off = jr.normal(getkey(), (2, n - 1), dtype=jnp.float32) * 0.5 * grade[None, :-1]
+    matrix = jnp.diag(diagonal) + jnp.diag(off[0], -1) + jnp.diag(off[1], 1)
+    op = lx.MatrixLinearOperator(matrix, lx.tridiagonal_tag)
+    _, lad = lx.slogdet(op, lx.Tridiagonal())
+    _, ref_lad = jnp.linalg.slogdet(matrix.astype(jnp.float64))
+    assert jnp.allclose(lad, ref_lad.astype(jnp.float32), rtol=1e-5)
+
+
+@pytest.mark.parametrize("power", [0, 40, 77, 150])
+def test_tridiagonal_slogdet_asymmetric_off_diagonals(power):
+    """Off-diagonals of wildly different sizes but a coupling of exactly 1.
+
+    The minor recurrence only ever sees `lower * upper`, so this operator is a
+    permuted identity: its determinant is exactly 1 for every `power`. The prescale
+    therefore has to measure the coupling as `sqrt(|l u|)` -- taking `max(|l|, |u|)`
+    instead rescales by 10**power too much and underflows the whole recurrence.
+    """
+    n = 6
+    diagonal = jnp.ones(n, dtype=jnp.float64)
+    lower = jnp.full(n - 1, 10.0**power, dtype=jnp.float64)
+    upper = jnp.full(n - 1, 10.0**-power, dtype=jnp.float64)
+    op = lx.TridiagonalLinearOperator(diagonal, lower, upper)
+    sign, lad = lx.slogdet(op, lx.Tridiagonal())
+    assert sign == 1
+    assert jnp.allclose(lad, 0.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("span", [0.0, 40.0, 50.0])
+def test_tridiagonal_slogdet_graded_jvp(span, getkey):
+    """The gradient has to tolerate the same grading as the primal.
+
+    The renormalisation scale cancels out of `lad` exactly, so its tangent is zero --
+    but only if we say so. Letting AD differentiate it costs a `1/scale**2`, which
+    overflows once a block's scale falls below sqrt(smallest normal), i.e. at half
+    the grading the primal handles. That put the cliff at `span = 40`, which is
+    exactly what `test_tridiagonal_slogdet_graded` pins.
+    """
+    n = 64
+    grade = 10.0 ** (-span * jnp.arange(n, dtype=jnp.float64) / n)
+    diagonal = (jr.normal(getkey(), (n,), dtype=jnp.float64) + 4.0) * grade
+    off = jr.normal(getkey(), (2, n - 1), dtype=jnp.float64) * 0.5 * grade[None, :-1]
+    matrix = jnp.diag(diagonal) + jnp.diag(off[0], -1) + jnp.diag(off[1], 1)
+
+    def lad_of(m):
+        return lx.slogdet(lx.MatrixLinearOperator(m, lx.tridiagonal_tag))[1]
+
+    grad = jax.grad(lad_of)(matrix)
+    assert jnp.all(jnp.isfinite(grad))
+    # d(log|det A|)/dA = (A^-1)^T, of which only the band is meaningful here.
+    expected = jnp.linalg.inv(matrix).T
+    for k in (-1, 0, 1):
+        assert jnp.allclose(jnp.diag(grad, k), jnp.diag(expected, k), rtol=1e-8)
+
+
+def test_tridiagonal_slogdet_implementations_agree(getkey):
+    """`lax.platform_dependent` runs only one implementation per platform.
+
+    So CI on CPU never exercises `_slogdet_parallel` and CI on GPU never exercises
+    `_slogdet_sequential`, and nothing otherwise compares them. Call both directly on
+    whatever device is to hand: they compute the same recurrence and must agree.
+    """
+    for n in (1, 2, 3, 5, 16, 17, 64, 129):
+        diagonal = jr.normal(getkey(), (n,), dtype=jnp.float64) + 3.0
+        lower = jr.normal(getkey(), (n - 1,), dtype=jnp.float64)
+        upper = jr.normal(getkey(), (n - 1,), dtype=jnp.float64)
+        matrix = jnp.diag(diagonal) + jnp.diag(lower, -1) + jnp.diag(upper, 1)
+        _, ref_lad = jnp.linalg.slogdet(matrix)
+        op = lx.TridiagonalLinearOperator(diagonal, lower, upper)
+        seq = _slogdet_sequential(diagonal, lower, upper)
+        assert jnp.allclose(seq[1], ref_lad, rtol=1e-10), f"sequential, n={n}"
+        if n > 1:
+            # `_slogdet_parallel` is only reached for n > 1; `slogdet` special-cases
+            # the 1x1 operator before dispatching.
+            par = _slogdet_parallel(diagonal, lower, upper)
+            assert jnp.allclose(par[1], ref_lad, rtol=1e-10), f"parallel, n={n}"
+            assert seq[0] == par[0], f"sign disagreement, n={n}"
+        # And the shipped entry point agrees with both on this platform.
+        assert jnp.allclose(lx.slogdet(op, lx.Tridiagonal())[1], ref_lad, rtol=1e-10)
+
+
 def test_tridiagonal_slogdet_singular():
-    """A singular operator gives `(0, -inf)`, not `nan`."""
+    """A singular operator gives `(0, -inf)`, not `nan`.
+
+    Only for this operator, not in general: the division-free minor recurrence is not
+    backward stable when the answer is exactly zero, so a singular operator whose zero
+    determinant arises from cancellation across many steps can come out as a small
+    finite value instead, and the two implementations need not agree on which. Detecting
+    exact singularity is not something this solver promises; use a rank-revealing
+    factorisation (`lx.SVD`) if that is what you need.
+    """
     matrix = jnp.array(
         [[1.0, 1.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=jnp.float64
     )
