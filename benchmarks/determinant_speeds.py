@@ -151,15 +151,15 @@ def section_platform_dispatch(sizes):
     for n in sizes:
         arrays = tridiagonal_arrays(n)
         reps = 20 if n <= 8192 else 5
-        seq = time_us(_tri._slogdet_sequential, arrays, reps)
-        par = time_us(_tri._slogdet_parallel, arrays, reps)
+        seq = time_us(_tri._slogdet_scan, arrays, reps)
+        par = time_us(_tri._slogdet_tree_reduce, arrays, reps)
         print(f"{n:>9} {seq:>12.1f} {par:>10.1f} {seq / par:>12.1f}")
 
 
 def section_block(sizes, on_gpu):
     """`_SLOGDET_BLOCK`: renormalisation interval, and chunk length on GPU."""
     which = "tree" if on_gpu else "scan"
-    impl = _tri._slogdet_parallel if on_gpu else _tri._slogdet_sequential
+    impl = _tri._slogdet_tree_reduce if on_gpu else _tri._slogdet_scan
     print(f"\n=== `_SLOGDET_BLOCK` sweep, timing the {which} (float64, us) ===")
     print("Governs both implementations, so it is swept on whichever runs here.")
     print("Device time, not wall clock: the settings differ by less than dispatch.")
@@ -182,23 +182,120 @@ def section_block(sizes, on_gpu):
 
 
 def section_radix(sizes):
-    """`_SLOGDET_RADIX`: tree fan-in. Only `_slogdet_parallel` has a tree."""
-    print("\n=== `_SLOGDET_RADIX` sweep, timing the tree (float64, us) ===")
-    print("Device time, not wall clock, as above.")
-    header = "".join(f"{r:>9}" for r in (2, 4, 8, 16))
-    print(f"{'n':>9}{header}")
+    """`_SLOGDET_RADIX`: tree fan-in. Only `_slogdet_tree_reduce` has a tree.
+
+    Two questions: does the radix cost accuracy, and which is fastest. The first
+    decides whether the second is allowed to choose.
+    """
+    radices = (2, 4, 8, 16, 32)
     original = _tri._SLOGDET_RADIX
+    print(
+        "\n=== `_SLOGDET_RADIX`: does fan-in cost accuracy? (float64, n = 131072) ==="
+    )
+    print("Relative error in `lad` against a longdouble renormalising recurrence.")
+    print(f"{'case':>12}" + "".join(f"{r:>10}" for r in radices))
+    n = 131072
+    rng = np.random.default_rng(0)
+    grade = 10.0 ** (-30.0 * np.arange(n) / n)
+    cases = {
+        # Near-defective: the transfer matrices are close to rank one, which is the
+        # case where extra products between renormalisations should hurt most.
+        "laplacian": (np.full(n, 2.0), np.full(n - 1, -1.0), np.full(n - 1, -1.0)),
+        "defective": (np.full(n, 2.0), np.full(n - 1, -4.0), np.full(n - 1, -0.25)),
+        "random": (
+            rng.normal(size=n) + 3.0,
+            rng.normal(size=n - 1),
+            rng.normal(size=n - 1),
+        ),
+        "indefinite": (
+            rng.normal(size=n),
+            rng.normal(size=n - 1),
+            rng.normal(size=n - 1),
+        ),
+        "graded30": (
+            (rng.normal(size=n) + 4.0) * grade,
+            rng.normal(size=n - 1) * 0.5 * grade[:-1],
+            rng.normal(size=n - 1) * 0.5 * grade[:-1],
+        ),
+    }
     try:
+        for name, arrays in cases.items():
+            reference = longdouble_slogdet(*arrays)
+            args = tuple(jnp.asarray(x) for x in arrays)
+            row = []
+            for radix in radices:
+                _tri._SLOGDET_RADIX = radix
+                fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
+                lad = float(jax.jit(fn)(*args)[1])
+                row.append(
+                    "nonfin"
+                    if not np.isfinite(lad)
+                    else f"{abs(lad - reference) / abs(reference):.1e}"
+                )
+            print(f"{name:>12}" + "".join(f"{v:>10}" for v in row))
+
+        print("\n=== `_SLOGDET_RADIX`: does fan-in cost grading tolerance? ===")
+        print("Largest span the tree gets right, as in the grading section below.")
+        print(f"{'radix':>7} {'largest ok span':>17}")
+        for radix in radices:
+            _tri._SLOGDET_RADIX = radix
+            print(f"{radix:>7} {tree_grading_limit():>17}")
+
+        print("\n=== `_SLOGDET_RADIX` sweep, timing the tree (float64, us) ===")
+        print("Device time, not wall clock, as above.")
+        print(f"{'n':>9}" + "".join(f"{r:>9}" for r in radices))
         for n in sizes:
             arrays = tridiagonal_arrays(n)
             row = []
-            for radix in (2, 4, 8, 16):
+            for radix in radices:
                 _tri._SLOGDET_RADIX = radix
-                fn = lambda *a: _tri._slogdet_parallel(*a)  # noqa: E731
+                fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
                 row.append(time_us_device(fn, arrays))
             print(f"{n:>9}" + "".join(f"{v:>9.1f}" for v in row))
     finally:
         _tri._SLOGDET_RADIX = original
+
+
+def longdouble_slogdet(diagonal, lower, upper):
+    """`log|det|` from the same recurrence in 80-bit, as an independent reference.
+
+    `numpy.linalg.slogdet` would need a dense n x n matrix, which is not affordable at
+    the sizes this section uses.
+    """
+    diagonal = np.asarray(diagonal, np.longdouble)
+    lower = np.asarray(lower, np.longdouble)
+    upper = np.asarray(upper, np.longdouble)
+    previous, current = np.longdouble(1.0), diagonal[0]
+    accumulated = np.longdouble(0.0)
+    for i in range(1, len(diagonal)):
+        previous, current = (
+            current,
+            diagonal[i] * current - lower[i - 1] * upper[i - 1] * previous,
+        )
+        scale = max(abs(previous), abs(current))
+        if scale > 0:
+            previous, current = previous / scale, current / scale
+            accumulated += np.log(scale)
+    return float(accumulated + np.log(abs(current)))
+
+
+def tree_grading_limit(n=128, seeds=3):
+    """Largest entry grading the tree gets right, at the current `_SLOGDET_RADIX`."""
+    last_ok = 0
+    for span in range(10, 110, 2):
+        for seed in range(seeds):
+            rng = np.random.default_rng(seed)
+            grade = 10.0 ** (-span * np.arange(n) / n)
+            diag = (rng.normal(size=n) + 4.0) * grade
+            off = rng.normal(size=(2, n - 1)) * 0.5 * grade[None, :-1]
+            reference = longdouble_slogdet(diag, off[0], off[1])
+            args = (jnp.asarray(diag), jnp.asarray(off[0]), jnp.asarray(off[1]))
+            fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
+            lad = float(jax.jit(fn)(*args)[1])
+            if not np.isfinite(lad) or abs(lad - reference) > 1e-10 * abs(reference):
+                return last_ok
+        last_ok = span
+    return last_ok
 
 
 def section_grading(spans, n=128, seeds=4):
@@ -229,7 +326,7 @@ def section_grading(spans, n=128, seeds=4):
                     matrix = np.diag(diag) + np.diag(off[0], -1) + np.diag(off[1], 1)
                     _, ref = np.linalg.slogdet(matrix)
                     args = (jnp.asarray(diag), jnp.asarray(off[0]), jnp.asarray(off[1]))
-                    for impl in (_tri._slogdet_sequential, _tri._slogdet_parallel):
+                    for impl in (_tri._slogdet_scan, _tri._slogdet_tree_reduce):
                         fn = lambda *a, impl=impl: impl(*a)  # noqa: E731
                         lad = float(jax.jit(fn)(*args)[1])
                         if not np.isfinite(lad) or abs(lad - ref) > 1e-9 * abs(ref):
@@ -256,8 +353,8 @@ def section_gradient(sizes):
         f" {'marginal':>10}"
     )
     for name, impl in (
-        ("scan", _tri._slogdet_sequential),
-        ("tree", _tri._slogdet_parallel),
+        ("scan", _tri._slogdet_scan),
+        ("tree", _tri._slogdet_tree_reduce),
     ):
         for n in sizes:
             arrays = tridiagonal_arrays(n)
@@ -328,7 +425,7 @@ def main():
         section_radix(tuning_sizes)
     else:
         print("\n=== `_SLOGDET_RADIX` sweep: skipped ===")
-        print("Only `_slogdet_parallel` has a tree, and CPU never runs it -- the")
+        print("Only `_slogdet_tree_reduce` has a tree, and CPU never runs it -- the")
         print("platform dispatch and the JVP both use the scan there.")
     section_grading(spans)
     section_gradient(sizes)

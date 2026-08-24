@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import lineax as lx
 import pytest
-from lineax._solver.tridiagonal import _slogdet_parallel, _slogdet_sequential
+from lineax._solver.tridiagonal import _slogdet_scan, _slogdet_tree_reduce
 
 from .helpers import (
     construct_matrix,
@@ -391,8 +391,8 @@ def test_tridiagonal_slogdet_graded_jvp(span, getkey):
 def test_tridiagonal_slogdet_implementations_agree(getkey):
     """`lax.platform_dependent` runs only one implementation per platform.
 
-    So CI on CPU never exercises `_slogdet_parallel` and CI on GPU never exercises
-    `_slogdet_sequential`, and nothing otherwise compares them. Call both directly on
+    So CI on CPU never exercises `_slogdet_tree_reduce` and CI on GPU never exercises
+    `_slogdet_scan`, and nothing otherwise compares them. Call both directly on
     whatever device is to hand: they compute the same recurrence and must agree.
     """
     for n in (1, 2, 3, 5, 16, 17, 64, 129):
@@ -402,12 +402,12 @@ def test_tridiagonal_slogdet_implementations_agree(getkey):
         matrix = jnp.diag(diagonal) + jnp.diag(lower, -1) + jnp.diag(upper, 1)
         _, ref_lad = jnp.linalg.slogdet(matrix)
         op = lx.TridiagonalLinearOperator(diagonal, lower, upper)
-        seq = _slogdet_sequential(diagonal, lower, upper)
+        seq = _slogdet_scan(diagonal, lower, upper)
         assert jnp.allclose(seq[1], ref_lad, rtol=1e-10), f"sequential, n={n}"
         if n > 1:
-            # `_slogdet_parallel` is only reached for n > 1; `slogdet` special-cases
+            # `_slogdet_tree_reduce` is only reached for n > 1; `slogdet` special-cases
             # the 1x1 operator before dispatching.
-            par = _slogdet_parallel(diagonal, lower, upper)
+            par = _slogdet_tree_reduce(diagonal, lower, upper)
             assert jnp.allclose(par[1], ref_lad, rtol=1e-10), f"parallel, n={n}"
             assert seq[0] == par[0], f"sign disagreement, n={n}"
         # And the shipped entry point agrees with both on this platform.

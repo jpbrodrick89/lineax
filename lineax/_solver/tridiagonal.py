@@ -99,8 +99,8 @@ class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
             diagonal,
             lower_diagonal,
             upper_diagonal,
-            cpu=_slogdet_sequential,
-            default=_slogdet_parallel,
+            cpu=_slogdet_scan,
+            default=_slogdet_tree_reduce,
         )
 
     def assume_full_rank(self):
@@ -127,12 +127,18 @@ Nothing.
 #
 # They differ only in how the recurrence is associated:
 #
-#   * `_slogdet_sequential` walks it in order, which is optimal on CPU.
-#   * `_slogdet_parallel` rewrites it as a product of 2x2 transfer matrices and
-#     evaluates that product with a tree, which is what GPUs need: there, each
+#   * `_slogdet_scan` walks it in order, which is optimal on CPU.
+#   * `_slogdet_tree_reduce` rewrites it as a product of 2x2 transfer matrices and
+#     reassociates that product into a balanced tree, which is what GPUs need: there,
+#     each
 #     `lax.scan` iteration costs a kernel launch (~8us) whatever the work inside it,
 #     so the sequential form costs ~8us * n / block: on an A100 in float64 that is 15x
 #     slower at n = 512, 199x at n = 8192, and 3377x at n = 131072.
+#
+# Both names refer to how the product is associated, not to the JAX primitives used:
+# the tree runs a short `lax.scan` within each chunk too. It is a reduction rather than
+# a scan -- only the final product is wanted, not every prefix -- and it is built by an
+# iterative loop over levels, not by recursion.
 #
 # `Tridiagonal.slogdet` picks between them with `lax.platform_dependent`. `lx.slogdet`'s
 # JVP rule differentiates that, so each platform also reverses the implementation it
@@ -145,56 +151,54 @@ Nothing.
 
 # Number of raw recurrence steps between renormalisations. Bigger blocks amortise the
 # renormalisation over more steps; smaller blocks let the minors decay further before a
-# block underflows. A block underflows once the minors decay past float range within it,
-# i.e. roughly when R * K > 308 for an operator whose entries span 10**-R, so this caps
-# the tolerated grading. Largest R that both implementations get right, in float64,
-# over six draws of `test_tridiagonal_slogdet_graded`'s construction at n = 128:
-#
-#     K:                 2     4     8    16    32
-#     sequential:      108    66    38    20    10
-#     parallel:         68    66    38    20    10
-#     heuristic 308/K: 154    77    38    19    10
-#
-# The heuristic is accurate for K >= 8 and optimistic below it, where something else
-# binds first: the tree in `_slogdet_parallel` has its own ceiling near 68 decades,
-# because a tree group spans exponentially many steps between renormalisations. At
-# K = 4 both paths break at the same R, so the GPU path costs no grading tolerance.
+# block underflows. A block underflows once the minors decay past float range within
+# it, i.e. roughly when R * K > 308 for an operator whose entries span 10**-R, so this
+# caps the tolerated grading. The heuristic is accurate for K >= 8 and optimistic below
+# it, where the tree's own ceiling near 68 decades binds first instead. At K = 4 both
+# implementations land around 60 decades -- the exact figure moves by a few either way
+# with the draw -- so the GPU path costs no tolerance relative to the scan.
 #
 # Past that limit neither path fails cleanly. A block's minors decay into the denormal
 # range before the renormalisation sees them, losing precision but staying finite, so
-# for a band of R above the limit the result is silently wrong rather than -inf:
-# measured at K = 4, n = 128, `sequential` is wrong by 2.6e-4 to 1.3e-3 relative in
-# `lad` (a factor of e**14 in |det|) for R in 66..79 before underflowing at 80, and
-# `parallel` by ~2e-5 from 66 to past 80. This is inherent to renormalising in blocks
-# and is not specific to K = 4: K = 2 has the same band, at roughly double the R.
+# above the limit there is a band of R where the result is silently wrong rather than
+# -inf: at K = 4, `_slogdet_scan` is wrong by up to 1.3e-3 relative in `lad` -- a factor
+# of e**14 in |det| -- for R in 66..79 before underflowing at 80. This is inherent to
+# renormalising in blocks and is not specific to K = 4: K = 2 has the same band, at
+# roughly double the R.
 #
-# All of the above is float64. The binding quantity is the exponent range, so float32
-# divides every figure by about eight: at K = 4 the measured limit is 8 decades, with
-# the silently-wrong band at 9 and underflow from 10.
+# The binding quantity is the exponent range, so float32 divides every figure by about
+# eight: at K = 4 the limit is 8 decades, silently wrong at 9, underflow from 10.
 #
-# 4 is also the smallest value that still beats LAPACK `gttrf` on CPU at every size
-# (1.1-1.5x unbatched, 2.2-3.0x batched). Going to 2 doubles both the limit and the
-# band above it, but only on CPU -- `parallel`'s own ceiling near 68 binds regardless
-# -- and it only reaches parity with `gttrf` unbatched.
-#
-# 8 would be 1.3x faster again on CPU (float64, every size measured), but its limit of
-# 38 decades sits just below the
-# 40 that `test_tridiagonal_slogdet_graded` pins, so it fails outright -- and on
-# GPU it fails silently rather than underflowing to -inf. It buys nothing there anyway:
-# `_slogdet_parallel` is within noise between 4 and 8 at every size measured, because
-# its launch count is `block + log_radix(n / block)` rather than `n / block`.
+# 4 is the largest K whose limit clears the 40 decades that
+# `test_tridiagonal_slogdet_graded` pins -- 8 drops it to 38 and fails outright -- and
+# the smallest that beats LAPACK `gttrf` on CPU at every size (1.1-1.5x unbatched,
+# 2.2-3.0x batched). It costs nothing on GPU, where the tree's launch count is
+# `block + log_radix(n / block)` rather than `n / block`. `benchmarks/determinant_speeds
+# .py` regenerates every figure quoted here.
 _SLOGDET_BLOCK = 4
 
-# Fan-in of the tree in `_slogdet_parallel`: how many chunk transfer matrices are
-# multiplied together between renormalisations, so it only affects `_slogdet_parallel`
-# and hence only GPU. 2 is reliably the slowest (fewer matrices per level means more
-# levels, hence more kernel launches); 4, 8 and 16 land within run-to-run scatter of
-# each other, individual runs disagreeing by ~15% on which is quickest (A100, float64,
-# n = 131072: 64, 49, 42, 48us of device time). 4 is the smallest of those, which is the
-# safe end: fewer products between renormalisations. Accuracy does not appear to
-# distinguish them -- on the near-defective discrete Laplacian at n = 262144, radices
-# 2, 4, 8 and 16 all land on the same 2.0e-12 relative error -- so this is a choice
-# about speed, and about not being at the far end of a range we have not stress-tested.
+# Fan-in of the tree: how many chunk transfer matrices are multiplied together between
+# renormalisations. Only `_slogdet_tree_reduce` has a tree, so this affects GPU only.
+#
+# On well-scaled operators the radix barely matters: 2 through 32 agree to within a
+# factor of 6 in relative error, even on near-defective ones where the transfer
+# matrices are close to rank one. What it does cost is grading tolerance, and there it
+# is a cliff rather than a gradient, for the same reason `_SLOGDET_BLOCK` is -- a group
+# spans `radix` times as many steps between renormalisations:
+#
+#     radix:            2     4     8    16    32
+#     tolerated R:     66    66    44    26    18
+#
+# 4 is the largest radix that costs nothing: it holds whatever the block length allows,
+# and beyond it the tolerance halves each time -- at 16, an operator
+# whose entries merely span 30 decades already comes back non-finite. That is worth
+# more than the ~15% 8 would buy (A100, float64, n = 131072: 65, 50, 43, 49, 53us of
+# device time for 2, 4, 8, 16, 32; 8 is the fastest, 2 reliably the slowest, since
+# fewer matrices per level means more levels and so more kernel launches).
+#
+# `benchmarks/determinant_speeds.py` regenerates all of this. Note when re-measuring
+# that `jax.jit` caches on function identity, so a sweep that jits the same function
+# object while mutating this constant silently measures the first setting every time.
 _SLOGDET_RADIX = 4
 
 
@@ -262,7 +266,7 @@ def _pad_steps(
     return diagonal, coupling, (steps + pad) // block
 
 
-def _slogdet_sequential(
+def _slogdet_scan(
     diagonal: Array, lower_diagonal: Array, upper_diagonal: Array
 ) -> tuple[Array, Array]:
     """Walk the minor recurrence in order. Optimal on CPU."""
@@ -349,7 +353,7 @@ def _mul(hi: tuple, lo: tuple) -> tuple:
 def _normalise(m: tuple, log_scale: Array) -> tuple[tuple, Array]:
     """Divide out the largest entry, accumulating its log."""
     a, b, c, d = m
-    # Exactly as in `_slogdet_sequential`: the scale cancels, so stop it rather than
+    # Exactly as in `_slogdet_scan`: the scale cancels, so stop it rather than
     # pay a `1/scale**2` in reverse mode. Here that is a real trade rather than a free
     # win -- it raises the grading a gradient tolerates from ~52 decades to ~64, so
     # that the gradient matches the primal, but costs 1.6x in gradient time (A100,
@@ -362,7 +366,7 @@ def _normalise(m: tuple, log_scale: Array) -> tuple[tuple, Array]:
             jnp.maximum(jnp.abs(a), jnp.abs(b)), jnp.maximum(jnp.abs(c), jnp.abs(d))
         )
     )
-    # As in `_slogdet_sequential`: hold an exactly-singular block at zero rather than
+    # As in `_slogdet_scan`: hold an exactly-singular block at zero rather than
     # producing `nan`, and let the `-inf` appear in the final log.
     inv = (1.0 / jnp.where(scale == 0, 1.0, scale)).astype(a.dtype)
     return (a * inv, b * inv, c * inv, d * inv), log_scale + jnp.log(scale)
@@ -402,7 +406,7 @@ def _reduce_level(m: tuple, log_scale: Array, size: int, radix: int):
     return acc, log_scale, groups
 
 
-def _slogdet_parallel(
+def _slogdet_tree_reduce(
     diagonal: Array, lower_diagonal: Array, upper_diagonal: Array
 ) -> tuple[Array, Array]:
     """Evaluate the transfer-matrix product with a tree. What GPUs want.
