@@ -512,12 +512,7 @@ def test_slogdet_jvp_jvp(solver, tags, getkey):
 def _structured_case(kind, n, key, complex_):
     """(operator, tangent_operator, solver) for each structure with a fast JVP."""
     dtype = jnp.complex128 if complex_ else jnp.float64
-
-    def rand(*shape):
-        out = jr.normal(key if not complex_ else jr.split(key)[0], shape, dtype=dtype)
-        return out
-
-    keys = jr.split(key, 8)
+    keys = jr.split(key, 2)
     if kind == "diagonal":
         make = lx.DiagonalLinearOperator
         args = lambda k: (jr.normal(k, (n,), dtype=dtype) + 4.0,)  # noqa: E731
@@ -720,3 +715,45 @@ def test_slogdet_pseudodeterminant_complex_sign_jvp():
     trace = jnp.sum(t_diag[kept] / diag[kept])
     assert jnp.allclose(lad_dot, jnp.real(trace))
     assert jnp.allclose(sign_dot, (trace - jnp.real(trace).astype(trace.dtype)) * sign)
+
+
+@pytest.mark.parametrize("kind", ["function", "jacobian"])
+def test_slogdet_structured_jvp_opaque_operator(kind):
+    """An operator carrying a structure tag need not be made of arrays alone.
+
+    `FunctionLinearOperator` and `JacobianLinearOperator` hold a callable, so the fast
+    path has to differentiate them with `eqx.filter_jvp`; plain `jax.jvp` rejects the
+    tangent, whose callable leaf is `None`. These reach the fast path like any other
+    tagged operator, and used to reach the generic one, so a regression here is a
+    crash on operators that previously worked.
+    """
+    n = 8
+    key = jr.PRNGKey(0)
+    k0, k1, k2, k3 = jr.split(key, 4)
+    matrix = (
+        jnp.diag(jr.normal(k0, (n,)) + 4.0)
+        + jnp.diag(jr.normal(k1, (n - 1,)) * 0.3, -1)
+        + jnp.diag(jr.normal(k2, (n - 1,)) * 0.3, 1)
+    )
+    tangent = jnp.diag(jr.normal(k3, (n,)))
+    structure = jax.ShapeDtypeStruct((n,), matrix.dtype)
+
+    def make(m):
+        if kind == "function":
+            return lx.FunctionLinearOperator(
+                lambda v: m @ v, structure, lx.tridiagonal_tag
+            )
+        return lx.JacobianLinearOperator(
+            lambda x, args: m @ x,
+            jnp.zeros(n, matrix.dtype),
+            None,
+            tags=lx.tridiagonal_tag,
+        )
+
+    (_, lad), (_, lad_dot) = eqx.filter_jvp(
+        lambda m: lx.slogdet(make(m), lx.Tridiagonal()), (matrix,), (tangent,)
+    )
+    _, ref_lad = jnp.linalg.slogdet(matrix)
+    ref_dot = jnp.trace(jnp.linalg.solve(matrix, tangent))
+    assert jnp.allclose(lad, ref_lad, rtol=1e-10)
+    assert jnp.allclose(lad_dot, ref_dot, rtol=1e-8)

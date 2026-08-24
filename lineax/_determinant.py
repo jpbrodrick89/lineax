@@ -80,12 +80,17 @@ def _slogdet_jvp(primals, tangents):
     # within 12% either way at n = 256 and n = 1024). For these four the
     # determinant comes straight from the operator's entries -- a product of the
     # diagonal, a three-term minor recurrence, or an FFT -- so differentiating it is
-    # O(n) (O(n log n) for `Circulant`), against O(n**2) work *and memory* for the
+    # O(n), or O(n log n) for `Circulant` and O(n**2) for `Triangular`, whose operator
+    # is a dense matrix in the first place. Against O(n**2) work *and memory* for the
     # generic rule below, which needs a 34GB tangent for a float64 tridiagonal operator
     # at n = 65536 and simply runs out. Only add a solver here whose `init` and
     # `slogdet` are pure JAX: `QR` would raise `NotImplementedError` for `geqrf`.
     if isinstance(inner_solver, Diagonal | Triangular | Tridiagonal | Circulant):
-        return jax.jvp(
+        # `eqx.filter_jvp`, not `jax.jvp`: an operator may carry non-array leaves --
+        # `FunctionLinearOperator.fn` and `JacobianLinearOperator.args` among them --
+        # which `jax.jvp` rejects outright, and `filter_custom_jvp` hands us `None`
+        # tangents for them, which it also cannot consume.
+        return eqx.filter_jvp(
             lambda o: solver.slogdet(solver.init(o, options), options),
             (operator,),
             (t_operator,),

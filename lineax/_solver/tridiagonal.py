@@ -275,12 +275,9 @@ def _slogdet_sequential(
 
     diagonal_rest, coupling_rest, num_blocks = _pad_steps(diagonal, coupling, block)
 
-    # Normalise the initial pair (D_{-1}, D_0) = (1, d_0) the same way.
-    scale0 = jnp.maximum(jnp.abs(diagonal[0]), 1.0)
-    init = (
-        jnp.ones((), dtype) / scale0.astype(dtype),
-        diagonal[0] / scale0.astype(dtype),
-    )
+    # The initial pair is (D_{-1}, D_0) = (1, d_0), which needs no renormalising:
+    # `|d_0| <= 1` after the prescale.
+    init = (jnp.ones((), dtype), diagonal[0])
     (_, det), scales = lax.scan(
         block_step,
         init,
@@ -291,7 +288,6 @@ def _slogdet_sequential(
     )
     lad = (
         n * exponent.astype(real_dtype) * jnp.log(jnp.array(2.0, real_dtype))
-        + jnp.log(scale0)
         + jnp.sum(jnp.log(scales))
         + jnp.log(jnp.abs(det))
     )
