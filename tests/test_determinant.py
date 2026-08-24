@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
 import lineax as lx
+import lineax._determinant as _determinant
 import pytest
 from lineax._solver.tridiagonal import _slogdet_associative_reduce, _slogdet_scan
 
@@ -822,6 +823,12 @@ def test_slogdet_structured_jvp_is_not_quadratic(kind, use_default_solver, getke
     paths; `Triangular`'s membership of the fast set is pinned semantically by
     `test_slogdet_unit_diagonal_jvp` instead.
 
+    This pins the cost of the fast path alone, and deliberately says nothing about
+    whether the fast path was chosen: it compares against a fixed expectation of
+    linear growth, not against the fallback, so it would go quiet if the fallback ever
+    stopped being quadratic. `test_slogdet_fast_path_beats_the_fallback` is what
+    guards the choice.
+
     `use_default_solver` covers the `AutoLinearSolver` look-through, which nothing else
     pins: without it the default solver silently falls back to the generic rule.
     """
@@ -840,6 +847,69 @@ def test_slogdet_structured_jvp_is_not_quadratic(kind, use_default_solver, getke
         counts.append(flops)
     growth = counts[1] / counts[0]
     assert growth < 3.0, f"gradient FLOPs grew {growth:.2f}x per doubling"
+
+
+@pytest.mark.parametrize("use_default_solver", [False, True])
+@pytest.mark.parametrize(
+    "kind",
+    ["diagonal", "tridiagonal", "tridiagonal_tagged", "triangular", "circulant"],
+)
+def test_slogdet_fast_path_beats_the_fallback(kind, use_default_solver, getkey):
+    """Differentiating these solvers directly must be cheaper than not.
+
+    This is the property that justifies the list in
+    `_differentiates_slogdet_directly` at all, so assert it against whatever the
+    fallback currently is, rather than against a fixed idea of what the fallback
+    costs. Today that is one solve per column of a dense tangent and the margin is
+    enormous. If the fallback ever gets cheaper -- a structural
+    `trace(A^-1 dA)` for tangent operators, say -- this keeps comparing like for like,
+    and the two outcomes are both useful: it still passes if direct differentiation
+    remains the better route, and it fails if the fallback overtakes it, which is
+    exactly when someone should be reconsidering the list rather than trusting it.
+
+    A FLOP count can under-report, since work inside an FFI custom call is opaque to
+    it, and a structural trace would reach `A^-1` through one -- `Tridiagonal.compute`
+    is `lax.linalg.tridiagonal_solve`. Measured, it is not opaque: materialising a
+    tridiagonal inverse costs 12 FLOPs per matrix entry on CPU and 10 on GPU, growing
+    4.00x per doubling, against 2 per entry for a `Diagonal` solve that involves no
+    FFI at all. Extracting a diagonal of `A^-1` needs `A^-1`, so that quadratic cost
+    is on the fallback's critical path and this comparison can see it.
+
+    One concrete prediction, so that it is not a surprise: `diagonal(invert(A))` needs
+    no materialisation and is linear, so a structural trace for `Diagonal` would cost
+    0.75x what differentiating it directly does (measured at every n from 128 to 1024).
+    This test is then supposed to fail for `diagonal`, and the answer is to drop
+    `Diagonal` from the list rather than to weaken the assertion. `Tridiagonal` goes
+    the other way -- 69x at n = 128, 296x at n = 512, widening -- because the band of
+    its inverse cannot be had without the inverse.
+
+    Contrast `test_slogdet_structured_jvp_is_not_quadratic`, which pins the cost of
+    the fast path alone and would go quiet if the fallback stopped being quadratic.
+    """
+    n = 256
+    op, _, solver = _structured_case(kind, n, getkey(), False)
+    if use_default_solver:
+        solver = None
+
+    def lad(o):
+        return lx.slogdet(o)[1] if solver is None else lx.slogdet(o, solver)[1]
+
+    fast = _flops(jax.grad(lad), op)
+    if fast is None:
+        pytest.skip("backend does not report a FLOP count")
+    # Force the fallback for the same operator and solver. Nothing else can produce
+    # it: the choice is made on the solver's type, so there is no operator to pass
+    # that would take the slow route while staying comparable.
+    original = _determinant._differentiates_slogdet_directly
+    try:
+        _determinant._differentiates_slogdet_directly = lambda solver, operator: False
+        fallback = _flops(jax.grad(lad), op)
+    finally:
+        _determinant._differentiates_slogdet_directly = original
+    assert fast < fallback, (
+        f"differentiating {kind} directly costs {fast} FLOPs against {fallback} for "
+        "the fallback, so it is no longer worth special-casing"
+    )
 
 
 @pytest.mark.parametrize(
