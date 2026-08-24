@@ -100,7 +100,7 @@ class Tridiagonal(AbstractDirectLinearSolver[_TridiagonalState]):
             lower_diagonal,
             upper_diagonal,
             cpu=_slogdet_scan,
-            default=_slogdet_tree_reduce,
+            default=_slogdet_associative_reduce,
         )
 
     def assume_full_rank(self):
@@ -128,17 +128,18 @@ Nothing.
 # They differ only in how the recurrence is associated:
 #
 #   * `_slogdet_scan` walks it in order, which is optimal on CPU.
-#   * `_slogdet_tree_reduce` rewrites it as a product of 2x2 transfer matrices and
-#     reassociates that product into a balanced tree, which is what GPUs need: there,
-#     each
+#   * `_slogdet_associative_reduce` rewrites it as a product of 2x2 transfer
+#     matrices and reassociates that product into a balanced tree, which is what GPUs
+#     need: there, each
 #     `lax.scan` iteration costs a kernel launch (~8us) whatever the work inside it,
 #     so the sequential form costs ~8us * n / block: on an A100 in float64 that is 15x
 #     slower at n = 512, 199x at n = 8192, and 3377x at n = 131072.
 #
 # Both names refer to how the product is associated, not to the JAX primitives used:
-# the tree runs a short `lax.scan` within each chunk too. It is a reduction rather than
-# a scan -- only the final product is wanted, not every prefix -- and it is built by an
-# iterative loop over levels, not by recursion.
+# the tree runs a short `lax.scan` within each chunk too. It is a *reduction* rather
+# than a scan because only the final product is wanted, not every prefix, which is what
+# makes it cheaper than `lax.associative_scan`; and it is built by an iterative loop
+# over levels, not by recursion.
 #
 # `Tridiagonal.slogdet` picks between them with `lax.platform_dependent`. `lx.slogdet`'s
 # JVP rule differentiates that, so each platform also reverses the implementation it
@@ -178,7 +179,8 @@ Nothing.
 _SLOGDET_BLOCK = 4
 
 # Fan-in of the tree: how many chunk transfer matrices are multiplied together between
-# renormalisations. Only `_slogdet_tree_reduce` has a tree, so this affects GPU only.
+# renormalisations. Only `_slogdet_associative_reduce` has a tree, so this affects
+# GPU only.
 #
 # On well-scaled operators the radix barely matters: 2 through 32 agree to within a
 # factor of 6 in relative error, even on near-defective ones where the transfer
@@ -406,7 +408,7 @@ def _reduce_level(m: tuple, log_scale: Array, size: int, radix: int):
     return acc, log_scale, groups
 
 
-def _slogdet_tree_reduce(
+def _slogdet_associative_reduce(
     diagonal: Array, lower_diagonal: Array, upper_diagonal: Array
 ) -> tuple[Array, Array]:
     """Evaluate the transfer-matrix product with a tree. What GPUs want.

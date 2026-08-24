@@ -152,14 +152,14 @@ def section_platform_dispatch(sizes):
         arrays = tridiagonal_arrays(n)
         reps = 20 if n <= 8192 else 5
         seq = time_us(_tri._slogdet_scan, arrays, reps)
-        par = time_us(_tri._slogdet_tree_reduce, arrays, reps)
+        par = time_us(_tri._slogdet_associative_reduce, arrays, reps)
         print(f"{n:>9} {seq:>12.1f} {par:>10.1f} {seq / par:>12.1f}")
 
 
 def section_block(sizes, on_gpu):
     """`_SLOGDET_BLOCK`: renormalisation interval, and chunk length on GPU."""
     which = "tree" if on_gpu else "scan"
-    impl = _tri._slogdet_tree_reduce if on_gpu else _tri._slogdet_scan
+    impl = _tri._slogdet_associative_reduce if on_gpu else _tri._slogdet_scan
     print(f"\n=== `_SLOGDET_BLOCK` sweep, timing the {which} (float64, us) ===")
     print("Governs both implementations, so it is swept on whichever runs here.")
     print("Device time, not wall clock: the settings differ by less than dispatch.")
@@ -182,7 +182,7 @@ def section_block(sizes, on_gpu):
 
 
 def section_radix(sizes):
-    """`_SLOGDET_RADIX`: tree fan-in. Only `_slogdet_tree_reduce` has a tree.
+    """`_SLOGDET_RADIX`: tree fan-in. Only `_slogdet_associative_reduce` has a tree.
 
     Two questions: does the radix cost accuracy, and which is fastest. The first
     decides whether the second is allowed to choose.
@@ -225,7 +225,7 @@ def section_radix(sizes):
             row = []
             for radix in radices:
                 _tri._SLOGDET_RADIX = radix
-                fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
+                fn = lambda *a: _tri._slogdet_associative_reduce(*a)  # noqa: E731
                 lad = float(jax.jit(fn)(*args)[1])
                 row.append(
                     "nonfin"
@@ -249,7 +249,7 @@ def section_radix(sizes):
             row = []
             for radix in radices:
                 _tri._SLOGDET_RADIX = radix
-                fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
+                fn = lambda *a: _tri._slogdet_associative_reduce(*a)  # noqa: E731
                 row.append(time_us_device(fn, arrays))
             print(f"{n:>9}" + "".join(f"{v:>9.1f}" for v in row))
     finally:
@@ -290,7 +290,7 @@ def tree_grading_limit(n=128, seeds=3):
             off = rng.normal(size=(2, n - 1)) * 0.5 * grade[None, :-1]
             reference = longdouble_slogdet(diag, off[0], off[1])
             args = (jnp.asarray(diag), jnp.asarray(off[0]), jnp.asarray(off[1]))
-            fn = lambda *a: _tri._slogdet_tree_reduce(*a)  # noqa: E731
+            fn = lambda *a: _tri._slogdet_associative_reduce(*a)  # noqa: E731
             lad = float(jax.jit(fn)(*args)[1])
             if not np.isfinite(lad) or abs(lad - reference) > 1e-10 * abs(reference):
                 return last_ok
@@ -310,6 +310,10 @@ def section_grading(spans, n=128, seeds=4):
     print("Entries spanning 10**-span; 'ok' means both implementations agree with a")
     print("dense reference. The arithmetic is the same on either platform, though")
     print("reduction order can move the boundary by a step of the sweep.")
+    step = (spans[1] - spans[0]) if len(spans) > 1 else 1
+    print(f"Sweeping in steps of {step} decades, so each figure is that much coarse:")
+    print("at a step of 8 the K = 2 and K = 4 rows can read the same when they differ")
+    print("by tens of decades. Use the full sweep, not `--quick`, to separate them.")
     print(f"{'block':>7} {'heuristic':>10} {'largest ok span':>17}")
     original = _tri._SLOGDET_BLOCK
     try:
@@ -326,7 +330,7 @@ def section_grading(spans, n=128, seeds=4):
                     matrix = np.diag(diag) + np.diag(off[0], -1) + np.diag(off[1], 1)
                     _, ref = np.linalg.slogdet(matrix)
                     args = (jnp.asarray(diag), jnp.asarray(off[0]), jnp.asarray(off[1]))
-                    for impl in (_tri._slogdet_scan, _tri._slogdet_tree_reduce):
+                    for impl in (_tri._slogdet_scan, _tri._slogdet_associative_reduce):
                         fn = lambda *a, impl=impl: impl(*a)  # noqa: E731
                         lad = float(jax.jit(fn)(*args)[1])
                         if not np.isfinite(lad) or abs(lad - ref) > 1e-9 * abs(ref):
@@ -354,7 +358,7 @@ def section_gradient(sizes):
     )
     for name, impl in (
         ("scan", _tri._slogdet_scan),
-        ("tree", _tri._slogdet_tree_reduce),
+        ("tree", _tri._slogdet_associative_reduce),
     ):
         for n in sizes:
             arrays = tridiagonal_arrays(n)
@@ -369,8 +373,17 @@ def section_gradient(sizes):
 
 
 def section_jvp_dispatch(sizes):
-    """Structured operators skip the generic one-solve-per-column JVP."""
+    """Structured operators skip the generic one-solve-per-column JVP.
+
+    The right-hand column is not the generic rule itself -- the fast path is chosen by
+    an `isinstance` on the solver, so these operators cannot be made to take it. It is
+    the rule's inner loop, hand-rolled: one solve per column of the dense tangent. It
+    runs forward rather than reverse and reuses an already-built state, so it is a
+    *lower bound* on what the generic rule would cost, and the ratio understates the
+    saving accordingly.
+    """
     print("\n=== `lx.slogdet` gradient: structured fast path vs the generic rule ===")
+    print("Right-hand column is a lower bound on the generic rule; see the docstring.")
     print(
         f"{'operator':>13} {'n':>7} {'fast path':>11} {'per column':>12} {'ratio':>7}"
     )
@@ -425,9 +438,12 @@ def main():
         section_radix(tuning_sizes)
     else:
         print("\n=== `_SLOGDET_RADIX` sweep: skipped ===")
-        print("Only `_slogdet_tree_reduce` has a tree, and CPU never runs it -- the")
+        print(
+            "Only `_slogdet_associative_reduce` has a tree, and CPU never runs\n"
+            "it -- the"
+        )
         print("platform dispatch and the JVP both use the scan there.")
-    section_grading(spans)
+    section_grading(list(spans))
     section_gradient(sizes)
     section_jvp_dispatch(jvp_sizes)
 
