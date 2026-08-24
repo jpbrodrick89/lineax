@@ -703,7 +703,17 @@ def test_slogdet_jvp_jvp(solver, tags, getkey):
 
 
 def _flops(fn, *args):
-    """Compiled FLOP count, or `None` where the backend does not report one."""
+    """Compiled FLOP count, or `None` where the backend does not report one.
+
+    Not a foolproof measure. It is XLA's own accounting, it can under-report work
+    inside an FFI call, and nothing obliges it to stay stable across JAX versions. So
+    the two tests using it are checked empirically rather than trusted: on jax 0.11.0,
+    between them they catch every failure we actually expect -- inverting the platform
+    dispatch, the fast JVP going quadratic, and dropping any one of the four solvers
+    from `_differentiates_slogdet_directly`. If a JAX upgrade makes them flaky, delete
+    them rather than tune the numbers. They guard performance properties, which
+    `benchmarks/determinant_speeds.py` also reports.
+    """
     analysis = jax.jit(fn).lower(*args).compile().cost_analysis()
     if analysis is None:
         return None
