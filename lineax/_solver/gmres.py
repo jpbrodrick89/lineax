@@ -20,17 +20,17 @@ import equinox.internal as eqxi
 import jax
 import jax.lax as lax
 import jax.numpy as jnp
+import jax.scipy as jsp
 import jax.tree_util as jtu
 from equinox.internal import ω
 from jaxtyping import Array, ArrayLike, Bool, Float, Inexact, PyTree
 
 from .._misc import structure_equal
 from .._norm import max_norm, two_norm
-from .._operator import AbstractLinearOperator, conj, linearise, MatrixLinearOperator
+from .._operator import AbstractLinearOperator, conj, linearise
 from .._solution import RESULTS
 from .base import AbstractLinearSolver
 from .misc import preconditioner_and_y0
-from .qr import QR
 
 
 _GMRESState: TypeAlias = AbstractLinearOperator
@@ -91,9 +91,14 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
     #    then checked in both the `y` and `b` domains (for `Ay = b`).
     # 2. We handle in-place updates with buffers to avoid generating unnecessary
     #    copies of arrays during the Gram-Schmidt procedure.
-    # 3. We use a QR solve at the end of the batched Gram-Schmidt instead
-    #    of a Cholesky solve of the normal equations. This is both faster and more
-    #    numerically stable.
+    # 3. We build the QR factorisation of the Hessenberg matrix incrementally via
+    #    Givens rotations during the Arnoldi process itself (as in
+    #    `scipy.sparse.linalg.gmres` and `jax.scipy.sparse.linalg.gmres`'s
+    #    `solve_method="incremental"`), rather than solving a dense linear problem
+    #    from scratch once the Krylov basis is complete. This both gives a running
+    #    residual estimate for free, allowing early exit within a restart cycle once
+    #    within tolerance, and avoids ever forming the (worse-conditioned) normal
+    #    equations.
     # 4. We use tricks to compile `A y` fewer times throughout the code, including
     #    passing a dummy initial residual.
     # 5. We return the number of steps, and whether or not the solve succeeded, as
@@ -115,10 +120,24 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             and self.atol == 0
             and self.rtol == 0
         )
-        if has_scale:
-            b_scale = self.atol + self.rtol * self.norm(vector)
         operator = state
         preconditioner, y0 = preconditioner_and_y0(operator, vector, options)
+        if has_scale:
+            b_norm = self.norm(vector)
+            b_scale = self.atol + self.rtol * b_norm
+            # Inner (preconditioned) convergence tolerance used to allow early exit
+            # *within* a restart cycle -- distinct from the outer `b_scale`, since the
+            # Arnoldi process runs on preconditioned residuals. Mirrors the `ptol`
+            # used by `scipy.sparse.linalg.gmres` / `jax.scipy.sparse.linalg.gmres`.
+            Mb_norm = self.norm(preconditioner.mv(vector))
+            ptol = Mb_norm * jnp.minimum(
+                1.0, jnp.where(b_norm > 0, b_scale / b_norm, 1.0)
+            )
+        else:
+            # No tolerance was specified, so there is no meaningful notion of "early":
+            # always run each restart cycle out to `restart` steps (or breakdown), as
+            # before.
+            ptol = -jnp.inf
         leaves, _ = jtu.tree_flatten(vector)
         size = sum(leaf.size for leaf in leaves)
         if self.max_steps is None:
@@ -166,7 +185,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             # `breakdown` -> `deferred_breakdown` and `deferred_breakdown` -> `_`
             y, r, deferred_breakdown, _, diff, r_min, step, stagnation_counter = carry
             y_new, r_new, breakdown, diff_new = self._gmres_compute(
-                operator, vector, y, r, restart, preconditioner, step == 0
+                operator, vector, y, r, restart, preconditioner, step == 0, ptol
             )
 
             #
@@ -245,7 +264,7 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         return solution, result, stats
 
     def _gmres_compute(
-        self, operator, vector, y, r, restart, preconditioner, first_pass
+        self, operator, vector, y, r, restart, preconditioner, first_pass, ptol
     ):
         #
         # internal function for computing the bulk of the gmres. We seperate this out
@@ -265,49 +284,101 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
                 lambda x: jnp.pad(x[..., None], ((0, 0),) * x.ndim + ((0, restart),)),
                 r_normalised,
             )
-            coeff_mat_init = jnp.eye(
-                restart,
-                restart + 1,
-                dtype=jnp.result_type(*jtu.tree_leaves(r_normalised)),
+            dtype = jnp.result_type(*jtu.tree_leaves(r_normalised))
+            coeff_mat_init = jnp.eye(restart, restart + 1, dtype=dtype)
+            # `givens[k]` stores the `(cs, sn)` pair of the Givens rotation that
+            # eliminated the subdiagonal entry introduced by Arnoldi step `k`. Once
+            # `coeff_mat` has had every past rotation (re-)applied to its new row, and
+            # a fresh rotation applied to eliminate its own subdiagonal entry, it holds
+            # (transposed) the upper-triangular `R` factor of the Hessenberg matrix's
+            # QR factorisation -- built up incrementally, one Arnoldi step at a time,
+            # rather than factorised in one shot at the end. `beta_vec` is the
+            # right-hand side of the (restart+1)-dimensional least-squares problem,
+            # rotated by the exact same sequence of Givens rotations; `abs(beta_vec[k
+            # + 1])` is then the norm of the residual of the (size-`k` truncated)
+            # least-squares problem, i.e. a running residual estimate obtained for
+            # free, with no extra matrix-vector product. This lets us exit as soon as
+            # that estimate is within tolerance, rather than always building the full
+            # `restart`-dimensional Krylov subspace. Mirrors
+            # `scipy.sparse.linalg.gmres` and `jax.scipy.sparse.linalg.gmres`'s
+            # `solve_method="incremental"`.
+            givens_init = jnp.zeros((restart, 2), dtype=dtype)
+            beta_vec_init = (
+                jnp.zeros((restart + 1,), dtype=dtype).at[0].set(r_norm.astype(dtype))
             )
 
             def cond_fun(carry):
-                _, _, breakdown, step = carry
-                return (step < restart) & jnp.invert(breakdown)
+                _, _, _, _, err, breakdown, step = carry
+                return (step < restart) & jnp.invert(breakdown) & (err > ptol)
 
             def body_fun(carry):
-                basis, coeff_mat, breakdown, step = carry
-                basis_new, coeff_mat_new, breakdown = self._arnoldi_gram_schmidt(
+                basis, coeff_mat, givens, beta_vec, err, breakdown, step = carry
+                (
+                    basis_new,
+                    coeff_mat_new,
+                    givens_new,
+                    beta_vec_new,
+                    err_new,
+                    breakdown,
+                ) = self._arnoldi_gram_schmidt(
                     operator,
                     preconditioner,
                     basis,
                     coeff_mat,
+                    givens,
+                    beta_vec,
+                    err,
                     step,
                     restart,
                     vector,
                     breakdown,
                 )
-                return basis_new, coeff_mat_new, breakdown, step + 1
+                return (
+                    basis_new,
+                    coeff_mat_new,
+                    givens_new,
+                    beta_vec_new,
+                    err_new,
+                    breakdown,
+                    step + 1,
+                )
 
             def buffers(carry):
-                basis, coeff_mat, _, _ = carry
+                basis, coeff_mat, _, _, _, _, _ = carry
                 return basis, coeff_mat
 
-            init_carry = (basis_init, coeff_mat_init, initial_breakdown, 0)
-            basis, coeff_mat, breakdown, steps = eqxi.while_loop(
+            init_carry = (
+                basis_init,
+                coeff_mat_init,
+                givens_init,
+                beta_vec_init,
+                r_norm,  # `err`: real-valued, always the norm of a residual.
+                initial_breakdown,
+                0,
+            )
+            basis, coeff_mat, _, beta_vec, _, breakdown, steps = eqxi.while_loop(
                 cond_fun, body_fun, init_carry, kind="lax", buffers=buffers
             )
-            beta_vec = jnp.concatenate(
-                (
-                    r_norm[None].astype(jnp.result_type(coeff_mat)),
-                    jnp.zeros_like(coeff_mat, shape=(restart,)),
-                )
-            )
-            coeff_op_transpose = MatrixLinearOperator(coeff_mat.T)
-            # TODO(raderj): move to a Hessenberg-specific solver
-            from .._solve import linear_solve
-
-            z = linear_solve(coeff_op_transpose, beta_vec, QR(), throw=False).value
+            # The rotation that eliminates each new subdiagonal entry deposits the
+            # *leftover* residual magnitude (what `err` tracks) at `beta_vec[steps]`.
+            # When `steps == restart` this is `beta_vec[restart]`, already excluded by
+            # `[:-1]` below. But when we stop earlier than that -- exiting once `err`
+            # is within tolerance, rather than by exhausting `restart` steps or
+            # breakdown -- that leftover sits at an index that *is* included in the
+            # `[:-1]` slice, and solving the triangular system would then wrongly
+            # attribute it to the (real, but not-yet-incorporated) Krylov direction
+            # `steps`, corrupting `z` by an amount of the same order as `err` itself.
+            # It must be zeroed out first, matching the fact that this direction has
+            # deliberately not been incorporated into the approximation.
+            beta_vec = beta_vec.at[steps].set(0)
+            # `coeff_mat.T`'s leading `restart` rows are exactly the upper-triangular
+            # `R` factor accumulated above (untouched rows -- from early exit or
+            # breakdown -- retain their `coeff_mat_init` identity row, which is still
+            # consistent with upper-triangularity), so a triangular solve replaces the
+            # dense QR solve of the whole Hessenberg system used previously; besides
+            # being cheaper, this also means we no longer need a `linear_solve` call
+            # (and the circular-import workaround it required) to solve it.
+            z = jsp.linalg.solve_triangular(coeff_mat[:, :-1].T, beta_vec[:-1])
             diff = jtu.tree_map(
                 lambda mat: jnp.tensordot(
                     mat[..., :-1], z, axes=1, precision=lax.Precision.HIGHEST
@@ -341,6 +412,9 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         preconditioner,
         basis,
         coeff_mat,
+        givens,
+        beta_vec,
+        err,
         step,
         restart,
         vector,
@@ -381,6 +455,25 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
             basis,
         )
         proj_new = proj.at[step + 1].set(step_norm_new.astype(jnp.result_type(proj)))
+
+        # Fold `proj_new` (the Hessenberg matrix's column `step`, i.e. the overlaps of
+        # this step's Krylov vector with every previous one, plus its own norm at
+        # `step + 1`) into the incrementally-built QR factorisation: first re-apply
+        # every previously-computed rotation (each one only ever touches the pair of
+        # entries it originally eliminated), then construct and apply one new
+        # rotation to eliminate this column's own subdiagonal entry at `step + 1`.
+        # `beta_vec`, the right-hand side of the same least-squares problem, is
+        # rotated identically, so that `abs(rotated_beta_vec[step + 1])` becomes the
+        # (cheap, exact) norm of the leftover residual.
+        def apply_kth_rotation(k, row):
+            return self._rotate_vector(row, k, givens[k, 0], givens[k, 1])
+
+        rotated_row = lax.fori_loop(0, step, apply_kth_rotation, proj_new)
+        cs, sn = self._givens_rotation(rotated_row[step], rotated_row[step + 1])
+        triangular_row = self._rotate_vector(rotated_row, step, cs, sn)
+        rotated_beta_vec = self._rotate_vector(beta_vec, step, cs, sn)
+        err_new = jnp.abs(rotated_beta_vec[step + 1])
+
         #
         # NOTE: two somewhat complicated things are going on here:
         #
@@ -395,15 +488,20 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         # correct solution was given to GMRES from the start. Both of these tend to
         # happen at the start of `gmres_compute`.
         # The latter may happen when using a sequence of iterative methods.
-        # If `initial_breakdown` occurs, then we leave the `coeff_mat` as it was
-        # at initialisation. Replacing it with the projection (which will be all 0s)
-        # will mean `coeff_mat` is not full-rank, and `QR` can only handle nonsquare
-        # matrices of full-rank.
+        # If `initial_breakdown` occurs, then we leave `coeff_mat`, `givens`, and
+        # `beta_vec` as they were at initialisation (under `vmap`, other batch
+        # elements may still be part-way through this same loop, so we select rather
+        # than skip): replacing `coeff_mat`'s row with the projection (which will be
+        # all 0s) would mean the triangular solve at the end divides by a zero
+        # diagonal entry.
         #
-        coeff_mat_new = coeff_mat.at[step, :].set(
-            proj_new, pred=jnp.invert(initial_breakdown)
-        )
-        return basis_new, coeff_mat_new, breakdown
+        keep = initial_breakdown
+        coeff_mat_new = coeff_mat.at[step, :].set(triangular_row, pred=jnp.invert(keep))
+        givens_step = givens.at[step, :].set(jnp.array([cs, sn]))
+        givens_new = jnp.where(keep, givens, givens_step)
+        beta_vec_new = jnp.where(keep, beta_vec, rotated_beta_vec)
+        err_new = jnp.where(keep, err, err_new)
+        return basis_new, coeff_mat_new, givens_new, beta_vec_new, err_new, breakdown
 
     def _normalise(
         self, x: PyTree[Array], eps: Float[ArrayLike, ""] | None
@@ -418,6 +516,28 @@ class GMRES(AbstractLinearSolver[_GMRESState]):
         with jax.numpy_dtype_promotion("standard"):
             x_normalised = (x**ω / safe_norm).ω
         return x_normalised, norm, breakdown
+
+    def _givens_rotation(self, a, b):
+        # Constructs `cs`, `sn` such that applying `_rotate_vector` at a pair of
+        # entries holding `(a, b)` zeroes out the second of the two. Safe against
+        # `a == 0`, `b == 0`, and overflow for large `|a|`/`|b|` (never squares
+        # either input, unlike the naive `r = sqrt(a**2 + b**2)`).
+        b_zero = jnp.abs(b) == 0
+        a_lt_b = jnp.abs(a) < jnp.abs(b)
+        t = -jnp.where(a_lt_b, a, b) / jnp.where(a_lt_b, b, a)
+        r = lax.rsqrt(1 + jnp.abs(t) ** 2).astype(t.dtype)
+        cs = jnp.where(b_zero, 1, jnp.where(a_lt_b, r * t, r))
+        sn = jnp.where(b_zero, 0, jnp.where(a_lt_b, r, r * t))
+        return cs, sn
+
+    def _rotate_vector(self, vec, i, cs, sn):
+        # Applies the Givens rotation `(cs, sn)` to the pair of entries `(i, i + 1)`
+        # of `vec`.
+        x1 = vec[i]
+        y1 = vec[i + 1]
+        x2 = cs.conj() * x1 - sn.conj() * y1
+        y2 = sn * x1 + cs * y1
+        return vec.at[i].set(x2).at[i + 1].set(y2)
 
     def transpose(self, state: _GMRESState, options: dict[str, Any]):
         transpose_options = {}
