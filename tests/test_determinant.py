@@ -1124,6 +1124,44 @@ def test_slogdet_pseudodeterminant_jvp(getkey):
     assert jnp.allclose(lad_dot, 1 / 2 + 1 / 3 + 1 / 5)
 
 
+@pytest.mark.parametrize("solver", ["lu", "auto"])
+def test_slogdet_generic_jvp_nonflat_structure(solver):
+    """The generic rule must handle a pytree-structured operator too.
+
+    It materialises the tangent with `as_matrix`, which flattens, and then solves
+    against each column -- but the operator may take a pytree, in which case a raw
+    column is the wrong shape and `linear_solve` rightly refuses it. Nothing about
+    this is specific to a tag or a solver: before the columns were unravelled, every
+    pytree-structured operator raised here, while its primal was fine.
+    """
+    matrix = jnp.diag(jnp.array([3.0, 4.0, 5.0, 6.0]))
+    matrix += jnp.diag(jnp.array([0.1, 0.2, 0.3]), -1)
+    matrix += jnp.diag(jnp.array([0.4, 0.5, 0.6]), 1)
+    t_matrix = jnp.arange(16.0).reshape(4, 4) * 0.01
+    struct = {
+        "a": jax.ShapeDtypeStruct((2,), jnp.float64),
+        "b": jax.ShapeDtypeStruct((2,), jnp.float64),
+    }
+
+    def make(m):
+        tree = {
+            "a": {"a": m[:2, :2], "b": m[:2, 2:]},
+            "b": {"a": m[2:, :2], "b": m[2:, 2:]},
+        }
+        return lx.PyTreeLinearOperator(tree, struct)
+
+    op, t_op = make(matrix), make(t_matrix)
+
+    def lad(o):
+        return lx.slogdet(o)[1] if solver == "auto" else lx.slogdet(o, lx.LU())[1]
+
+    primal, tangent = jax.jvp(lad, (op,), (t_op,))
+    _, ref_lad = jnp.linalg.slogdet(matrix)
+    ref_dot = jnp.trace(jnp.linalg.solve(matrix, t_matrix))
+    assert jnp.allclose(primal, ref_lad, rtol=1e-10)
+    assert jnp.allclose(tangent, ref_dot, rtol=1e-10)
+
+
 def test_slogdet_structured_jvp_nonflat_structure(getkey):
     """`is_tridiagonal` does not imply a flat in/out structure, and need not.
 

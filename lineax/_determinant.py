@@ -17,6 +17,7 @@ from typing import Any
 import equinox as eqx
 import equinox.internal as eqxi
 import jax
+import jax.flatten_util as jfu
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -117,6 +118,15 @@ def _slogdet_jvp(primals, tangents):
     # operator is the only differentiable argument, so t_operator is always present.
     dA = TangentLinearOperator(operator, t_operator).as_matrix()  # (m, n)
 
+    # `as_matrix` flattens, but the operator need not take a flat vector: it may have a
+    # pytree in- and out-structure, in which case `linear_solve` rejects a raw column.
+    # So unravel each column into the out-structure going in, and flatten the solution
+    # coming back, leaving the trace below to work on plain arrays either way.
+    out_zeros = jtu.tree_map(
+        lambda x: jnp.zeros(x.shape, x.dtype), operator.out_structure()
+    )
+    _, unravel_column = jfu.ravel_pytree(out_zeros)
+
     def solve_col(col):
         # `throw=True` mirrors `linear_solve`'s own JVP rule (see `_linear_solve_jvp`):
         # a failed tangent solve has nowhere to pipe an error result, so we surface it
@@ -126,10 +136,14 @@ def _slogdet_jvp(primals, tangents):
         # differentiate their own `slogdet`, and so return a non-finite gradient for a
         # singular operator -- where `d log|det A|` genuinely does not exist -- rather
         # than raising.
-        return linear_solve(operator, col, solver, state=state, throw=True).value
+        solution = linear_solve(
+            operator, unravel_column(col), solver, state=state, throw=True
+        ).value
+        return jfu.ravel_pytree(solution)[0]
 
-    # vmap over the n columns of dA; X[i] = A† dA[:,i], trace(A† dA) = trace(X)
-    X = jax.vmap(solve_col)(dA.T)  # (n, n)
+    # One solve per column of dA, so X[i] = A† dA[:, i] -- that is, X is the transpose
+    # of A† dA, whose trace is the same.
+    X = jax.vmap(solve_col, in_axes=1)(dA)  # (n, n)
     lad_dot = jnp.trace(X)
 
     if jnp.issubdtype(dA.dtype, jnp.complexfloating):
