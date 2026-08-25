@@ -176,11 +176,10 @@ def slogdet(
     - `options`: any extra options to pass to the solver.
     - `state`: if provided, use this pre-computed factorised state instead of
         calling `solver.init`. Allows multiple determinant computations to share
-        the same factorisation. Note that when differentiating with a solver that
-        supports it directly (see `_slogdet_jvp`), the state is rebuilt from
-        `operator`, since a state is by construction not differentiable; supplying
-        a `state` belonging to a *different* operator therefore gives a derivative
-        that does not match the primal.
+        the same factorisation. This should be the result of calling
+        [`lineax.AbstractLinearSolver.init`][] on the same `operator`; when
+        differentiating, it should be built from `operator` inside the
+        differentiated computation.
 
     **Returns:**
 
@@ -188,6 +187,13 @@ def slogdet(
     recover it cheaply (e.g. [`lineax.SVD`][] on a full-rank square matrix, or
     [`lineax.Normal`][]).
     """
+    if not isinstance(solver, AbstractDirectLinearSolver | Normal):
+        raise TypeError(
+            "`lx.slogdet` requires a direct solver: an "
+            "`lx.AbstractDirectLinearSolver`, or `lx.Normal` wrapping one. Got "
+            f"`{type(solver).__name__}`, which has no factorisation to compute a "
+            "determinant from."
+        )
     if options is None:
         options = {}
     if isinstance(operator, IdentityLinearOperator):
@@ -238,8 +244,10 @@ def determinant(
     - `options`: any extra options to pass to the solver.
     - `state`: if provided, use this pre-computed factorised state instead of
         calling `solver.init`. Allows multiple determinant computations to share
-        the same factorisation.
-
+        the same factorisation. This should be the result of calling
+        [`lineax.AbstractLinearSolver.init`][] on the same `operator`; when
+        differentiating, it should be built from `operator` inside the
+        differentiated computation.
     - `throw`: if `True` (the default), raise an error when the sign of the
         determinant is not available (e.g. when using [`lineax.Normal`][] or
         [`lineax.SVD`][] on a full-rank square matrix). If `False`, a `nan`

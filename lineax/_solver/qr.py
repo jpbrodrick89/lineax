@@ -116,7 +116,7 @@ class QR(AbstractDirectLinearSolver):
 
     def slogdet(self, state: _QRState, options: dict[str, Any]) -> tuple[Array, Array]:
         del options
-        (a, taus), transpose, _ = state
+        (a, taus), _, _ = state
         # diag(a) = diag(h.mT) = diag(h) = diag(R) for both tall and wide inputs
         lad = jnp.sum(jnp.log(jnp.abs(jnp.diag(a))))
         # det(Q) = prod over k of det(H_k) where H_k = I - tau_k * v_k * v_k^H.

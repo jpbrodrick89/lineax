@@ -14,7 +14,9 @@
 
 from typing import Any, TypeAlias
 
+import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from jaxtyping import Array, PyTree
 
 from .._misc import resolve_rcond, unit_phase
@@ -105,9 +107,15 @@ class Diagonal(AbstractDirectLinearSolver[_DiagonalState]):
         self, state: _DiagonalState, options: dict[str, Any]
     ) -> tuple[Array, Array]:
         del options
-        diag, _ = state
+        diag, packed_structures = state
         if diag is None:
-            return jnp.ones(()), jnp.zeros(())
+            # A unit diagonal has determinant one. `sign` takes the operator's dtype,
+            # so a complex operator yields a complex `sign`, matching the other paths.
+            leaves, treedef = packed_structures.value
+            out_structure, _ = jtu.tree_unflatten(treedef, leaves)
+            with jax.numpy_dtype_promotion("standard"):
+                dtype = jnp.result_type(*jtu.tree_leaves(out_structure))
+            return jnp.ones((), dtype), jnp.zeros((), jnp.finfo(dtype).dtype)
         if not self.well_posed:
             (size,) = diag.shape
             rcond = resolve_rcond(self.rcond, size, size, diag.dtype)

@@ -194,6 +194,37 @@ def test_determinant_throw_false_nan(solver, tags, getkey):
     assert jnp.isnan(det)
 
 
+def test_slogdet_rejects_iterative_solver(getkey):
+    """A bare iterative solver fails up front with a pointed message.
+
+    `Normal` checks its own inner solver, but an iterative solver passed directly
+    would otherwise sail through `init` and only die on the missing `slogdet`
+    attribute.
+    """
+    matrix = construct_matrix(getkey, lx.LU(), ())[0]
+    op = lx.MatrixLinearOperator(matrix)
+    with pytest.raises(TypeError, match="requires a direct solver"):
+        lx.slogdet(op, lx.GMRES(rtol=1e-6, atol=1e-6))  # pyright: ignore
+
+
+def test_slogdet_unit_diagonal_dtype():
+    """`Diagonal` on a unit-diagonal operator: `sign` takes the operator's dtype.
+
+    The determinant is one whatever the dtype, but a complex operator should get a
+    complex `sign`, as every other path arranges.
+    """
+    for dtype in (jnp.float64, jnp.complex128):
+        structure = jax.ShapeDtypeStruct((3,), dtype)
+        operator = lx.FunctionLinearOperator(
+            lambda x: x, structure, tags=(lx.diagonal_tag, lx.unit_diagonal_tag)
+        )
+        sign, lad = lx.slogdet(operator, lx.Diagonal(well_posed=True))
+        assert sign.dtype == dtype
+        assert lad.dtype == jnp.finfo(dtype).dtype
+        assert jnp.allclose(sign, 1.0)
+        assert jnp.allclose(lad, 0.0)
+
+
 # ----------------------------------------------------------------------------
 # SVD slogdet: log-pseudodeterminant
 # ----------------------------------------------------------------------------
