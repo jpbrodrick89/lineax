@@ -1435,6 +1435,78 @@ def test_slogdet_partial_isometry_semidefinite(
     )
 
 
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+@pytest.mark.parametrize("p,q", [(0, 0), (2, 1), (1, 2), (3, 3), (0, 6), (2, 0)])
+@pytest.mark.parametrize("exact_rank", (False, True))
+def test_slogdet_partial_isometry_hermitian(p, q, exact_rank, dtype, getkey):
+    # An indefinite Hermitian partial isometry, with `p` eigenvalues `1` and `q`
+    # eigenvalues `-1`: its sign is `(-1)**q`, as `HEVD` gives, but from traces.
+    n = 6
+    v, _ = jnp.linalg.qr(jr.normal(getkey(), (n, n), dtype=dtype))
+    eigenvalues = jnp.array([1.0] * p + [-1.0] * q + [0.0] * (n - p - q))
+    matrix = (v * eigenvalues.astype(dtype)[None, :]) @ v.conj().T
+    tags = (lx.partial_isometry_tag, lx.hermitian_tag)
+    if exact_rank:
+        tags = tags + (lx.RankTag(p + q),)
+    solver = lx.AutoLinearSolver(well_posed=False)
+    sign, lad = lx.slogdet(lx.MatrixLinearOperator(matrix, tags), solver)
+    ref_sign, _ = lx.slogdet(
+        lx.MatrixLinearOperator(matrix, lx.hermitian_tag), lx.HEVD()
+    )
+    assert lad == 0
+    assert sign.dtype == dtype
+    assert sign == ref_sign == (-1) ** q
+    assert not _custom_calls(
+        lambda m: lx.slogdet(lx.MatrixLinearOperator(m, tags), solver)[0], matrix
+    )
+
+
+def test_slogdet_partial_isometry_reflection(getkey):
+    # A Householder reflection is a real symmetric (so Hermitian) orthogonal matrix,
+    # with determinant -1: under the default full-rank solver this skips LU too.
+    u = jr.normal(getkey(), (5,))
+    u = u / jnp.linalg.norm(u)
+    reflection = jnp.eye(5) - 2 * jnp.outer(u, u)
+    tags = (lx.partial_isometry_tag, lx.symmetric_tag)
+    operator = lx.MatrixLinearOperator(reflection, tags)
+    assert lx.slogdet(operator) == (-1, 0)
+    assert lx.determinant(operator) == -1
+    # (`slogdet` rather than `determinant`, whose `throw=True` check is a callback.)
+    assert not _custom_calls(
+        lambda m: lx.slogdet(lx.MatrixLinearOperator(m, tags))[0], reflection
+    )
+
+
+@pytest.mark.parametrize(
+    "diag,sign",
+    [
+        ([1.0, -1.0, 0.0, -1.0, -1.0, 1.0], -1),
+        ([1.0, -1.0, 0.0, -1.0, 0.0, 1.0], 1),
+        ([0.0, 0.0, 0.0], 1),
+    ],
+)
+def test_slogdet_partial_isometry_hermitian_structured(diag, sign):
+    # A structured operator keeps its fast path: here `trace(A @ A)` is a sum of
+    # squared diagonal entries, and negation flips the sign iff the rank is odd.
+    diag = jnp.array(diag)
+    operator = lx.TaggedLinearOperator(
+        lx.DiagonalLinearOperator(diag), lx.partial_isometry_tag
+    )
+    rank = int(jnp.sum(diag != 0))
+    solver = lx.AutoLinearSolver(well_posed=False)
+    assert lx.slogdet(operator, solver) == (sign, 0)
+    assert lx.slogdet(-operator, solver) == (sign * (-1) ** rank, 0)
+    assert not _custom_calls(
+        lambda d: lx.slogdet(
+            lx.TaggedLinearOperator(
+                lx.DiagonalLinearOperator(d), lx.partial_isometry_tag
+            ),
+            solver,
+        )[0],
+        diag,
+    )
+
+
 def test_slogdet_partial_isometry_semidefinite_traced_sign(getkey):
     # Scaling by a traced unit scalar leaves only `semidefinite_tag`; the sign is then
     # resolved at runtime, per batch element.
