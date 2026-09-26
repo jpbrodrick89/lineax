@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import re
 from collections.abc import Callable
 
 import equinox as eqx
@@ -1355,3 +1356,136 @@ def test_slogdet_structured_jvp_opaque_operator(kind):
     ref_dot = jnp.trace(jnp.linalg.solve(matrix, tangent))
     assert jnp.allclose(lad, ref_lad, rtol=1e-10)
     assert jnp.allclose(lad_dot, ref_dot, rtol=1e-8)
+
+
+# ----------------------------------------------------------------------------
+# Partial isometries: `logabsdet` is exactly zero under `AutoLinearSolver`
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_slogdet_partial_isometry(dtype, getkey):
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 5), dtype=dtype))
+    if dtype == jnp.float64:
+        # Make it a reflection, so that the sign is genuinely -1.
+        q = q.at[:, 0].multiply(-jnp.sign(jnp.linalg.det(q)))
+    operator = lx.MatrixLinearOperator(q, lx.partial_isometry_tag)
+    sign, lad = lx.slogdet(operator)
+    ref_sign, _ = jnp.linalg.slogdet(q)
+    assert lad == 0
+    assert lad.dtype == jnp.float64
+    assert jnp.allclose(sign, ref_sign)
+    if dtype == jnp.float64:
+        assert sign == -1
+    assert jnp.allclose(lx.determinant(operator), jnp.linalg.det(q))
+
+
+def _custom_calls(fn, x) -> set[str]:
+    # Factorisations (LU, Cholesky, eigh, ...) lower to custom calls: to LAPACK on CPU.
+    hlo = jax.jit(fn).lower(x).compile().as_text()
+    assert hlo is not None
+    return set(re.findall(r'custom_call_target="([^"]+)"', hlo))
+
+
+def test_slogdet_partial_isometry_no_factorisation_when_sign_unused(getkey):
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 5)))
+
+    def slogdet(matrix):
+        return lx.slogdet(lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag))
+
+    # XLA eliminates the LU factorisation when only the constant `logabsdet` is used.
+    assert not _custom_calls(lambda m: slogdet(m)[1], q)
+    assert _custom_calls(lambda m: slogdet(m)[0], q)
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+@pytest.mark.parametrize("rank", (0, 2, 3))
+@pytest.mark.parametrize("negate", (False, True))
+@pytest.mark.parametrize(
+    "tag,exact_rank",
+    [("definite", False), ("definite", True), (lx.semidefinite_tag, False)],
+)
+def test_slogdet_partial_isometry_semidefinite(
+    tag, exact_rank, negate, rank, dtype, getkey
+):
+    # A (negated) orthogonal projector: its sign is `1`, or `(-1)**rank` when negated,
+    # as `HEVD` gives, but read off the trace rather than from every eigenvalue.
+    n = 6
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (n, n), dtype=dtype))
+    q = q[:, :rank]
+    matrix = q @ q.conj().T
+    if negate:
+        matrix = -matrix
+    if tag == "definite":
+        tag = lx.negative_semidefinite_tag if negate else lx.positive_semidefinite_tag
+    tags = (lx.partial_isometry_tag, tag)
+    if exact_rank:
+        tags = tags + (lx.RankTag(rank),)
+    solver = lx.AutoLinearSolver(well_posed=False)
+    sign, lad = lx.slogdet(lx.MatrixLinearOperator(matrix, tags), solver)
+    ref_sign, ref_lad = lx.slogdet(lx.MatrixLinearOperator(matrix, tag), lx.HEVD())
+    assert lad == 0
+    assert lad.dtype == jnp.float64
+    assert sign.dtype == dtype
+    assert sign == ref_sign
+    assert sign == ((-1) ** rank if negate else 1)
+    assert jnp.allclose(ref_lad, 0, atol=1e-12)
+    assert not _custom_calls(
+        lambda m: lx.slogdet(lx.MatrixLinearOperator(m, tags), solver)[0], matrix
+    )
+
+
+def test_slogdet_partial_isometry_semidefinite_traced_sign(getkey):
+    # Scaling by a traced unit scalar leaves only `semidefinite_tag`; the sign is then
+    # resolved at runtime, per batch element.
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3)))
+    projector = lx.MatrixLinearOperator(q @ q.T)
+    solver = lx.AutoLinearSolver(well_posed=False)
+
+    @jax.jit
+    @jax.vmap
+    def sign(scalar):
+        scaled = lx.TaggedLinearOperator(
+            projector * scalar, (lx.partial_isometry_tag, lx.semidefinite_tag)
+        )
+        return lx.slogdet(scaled, solver)[0]
+
+    assert jnp.array_equal(sign(jnp.array([1.0, -1.0])), jnp.array([1.0, -1.0]))
+
+
+def test_slogdet_partial_isometry_full_rank_solver_rejects_rank_deficient(getkey):
+    # As for `linear_solve`, a full-rank solver rejects a known-rank-deficient one.
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3)))
+    projector = lx.MatrixLinearOperator(
+        q @ q.T,
+        (lx.partial_isometry_tag, lx.positive_semidefinite_tag, lx.RankTag(3)),
+    )
+    with pytest.raises(ValueError, match="rank at most 3"):
+        lx.slogdet(projector)
+
+
+def test_slogdet_partial_isometry_explicit_solver_used_as_given(getkey):
+    # As in `linear_solve`, the fast path is `AutoLinearSolver`'s only: tagging a
+    # non-isometry exposes that an explicit solver still computes `logabsdet` itself.
+    matrix = jr.normal(getkey(), (4, 4))
+    operator = lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag)
+    assert lx.slogdet(operator)[1] == 0
+    _, lad = lx.slogdet(operator, lx.LU())
+    assert jnp.allclose(lad, jnp.linalg.slogdet(matrix)[1])
+
+
+def test_slogdet_partial_isometry_jvp(getkey):
+    # Along a curve of orthogonal matrices, `log|det|` is constant.
+    q0, _ = jnp.linalg.qr(jr.normal(getkey(), (4, 4)))
+    w = jr.normal(getkey(), (4, 4))
+    omega = w - w.T
+
+    def lad(t):
+        q = q0 @ jax.scipy.linalg.expm(t * omega)
+        return lx.slogdet(lx.MatrixLinearOperator(q, lx.partial_isometry_tag))
+
+    (sign, logabsdet), (sign_dot, lad_dot) = jax.jvp(
+        lad, (jnp.asarray(0.3),), (jnp.asarray(1.0),)
+    )
+    assert logabsdet == 0 and lad_dot == 0
+    assert sign_dot == 0

@@ -416,3 +416,73 @@ def test_gmres_wide_dynamic_range_rhs():
     sol = lx.linear_solve(operator, b, lx.GMRES(rtol=1e-12, atol=1e-12), throw=False)
     assert sol.result == lx.RESULTS.successful
     assert tree_allclose(sol.value, jnp.linalg.solve(A, b))
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+@pytest.mark.parametrize(
+    "shape,well_posed",
+    [((5, 5), True), ((5, 5), None), ((6, 3), False), ((3, 6), None)],
+)
+def test_partial_isometry_fast_path(shape, well_posed, dtype, getkey):
+    m, n = shape
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (max(m, n), min(m, n)), dtype=dtype))
+    matrix = q if m >= n else q.T
+    operator = lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag)
+    b = jr.normal(getkey(), (m,), dtype=dtype)
+    solver = lx.AutoLinearSolver(well_posed=well_posed)
+    solution = lx.linear_solve(operator, b, solver)
+    expected = jnp.linalg.lstsq(matrix, b)[0]
+    assert tree_allclose(solution.value, expected)
+    assert tree_allclose(lx.invert(operator, solver).mv(b), expected)
+
+
+def test_partial_isometry_fast_path_only_for_auto(getkey):
+    # The tag is taken on trust, so tagging a matrix that is *not* a partial isometry
+    # exposes which path ran: `AutoLinearSolver` applies `A^H`, while an explicitly
+    # chosen solver is used as given.
+    matrix = jr.normal(getkey(), (4, 4))
+    operator = lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag)
+    b = jr.normal(getkey(), (4,))
+    auto = lx.linear_solve(operator, b).value
+    assert tree_allclose(auto, matrix.T @ b)
+    lu = lx.linear_solve(operator, b, lx.LU()).value
+    assert tree_allclose(lu, jnp.linalg.solve(matrix, b))
+
+
+def test_partial_isometry_fast_path_keeps_static_checks(getkey):
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3)))
+    tall = lx.MatrixLinearOperator(q, lx.partial_isometry_tag)
+    with pytest.raises(ValueError, match="non-square"):
+        lx.linear_solve(tall, jnp.zeros(5))
+    projector = lx.MatrixLinearOperator(
+        q @ q.T, (lx.partial_isometry_tag, lx.RankTag(3))
+    )
+    with pytest.raises(ValueError, match="rank at most 3"):
+        lx.linear_solve(projector, jnp.zeros(5))
+    out = lx.linear_solve(projector, q[:, 0], lx.AutoLinearSolver(well_posed=False))
+    assert tree_allclose(out.value, q[:, 0])
+
+
+def test_partial_isometry_fast_path_jvp(getkey):
+    # Along a curve of orthogonal matrices `Q(t) = Q0 expm(t Ω)`, which respects the
+    # tag, differentiating the fast path `Q^T b` matches differentiating `Q^{-1} b`.
+    q0, _ = jnp.linalg.qr(jr.normal(getkey(), (4, 4)))
+    w = jr.normal(getkey(), (4, 4))
+    omega = w - w.T
+    b = jr.normal(getkey(), (4,))
+
+    def curve(t):
+        return q0 @ jax.scipy.linalg.expm(t * omega)
+
+    def fast(t):
+        operator = lx.MatrixLinearOperator(curve(t), lx.partial_isometry_tag)
+        return lx.linear_solve(operator, b).value
+
+    def reference(t):
+        return jnp.linalg.solve(curve(t), b)
+
+    t, dt = jnp.asarray(0.3), jnp.asarray(1.0)
+    out, t_out = jax.jvp(fast, (t,), (dt,))
+    ref, t_ref = jax.jvp(reference, (t,), (dt,))
+    assert tree_allclose(out, ref)
+    assert tree_allclose(t_out, t_ref)

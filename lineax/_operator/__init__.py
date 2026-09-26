@@ -25,6 +25,7 @@ from .base import (
     is_hermitian as is_hermitian,
     is_lower_triangular as is_lower_triangular,
     is_negative_semidefinite as is_negative_semidefinite,
+    is_partial_isometry as is_partial_isometry,
     is_positive_semidefinite as is_positive_semidefinite,
     is_semidefinite as is_semidefinite,
     is_symmetric as is_symmetric,

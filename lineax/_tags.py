@@ -39,6 +39,7 @@ positive_semidefinite_tag = _HasRepr("positive_semidefinite_tag")
 negative_semidefinite_tag = _HasRepr("negative_semidefinite_tag")
 semidefinite_tag = _HasRepr("semidefinite_tag")
 circulant_tag = _HasRepr("circulant_tag")
+partial_isometry_tag = _HasRepr("partial_isometry_tag")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -240,6 +241,7 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
         is_hermitian,
         is_lower_triangular,
         is_negative_semidefinite,
+        is_partial_isometry,
         is_positive_semidefinite,
         is_semidefinite,
         is_symmetric,
@@ -262,6 +264,7 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
             (has_unit_diagonal, unit_diagonal_tag),
             (is_tridiagonal, tridiagonal_tag),
             (is_circulant, circulant_tag),
+            (is_partial_isometry, partial_isometry_tag),
         ]
         if check(operator)
     }
@@ -286,6 +289,8 @@ for tag in (
     semidefinite_tag,
     tridiagonal_tag,
     circulant_tag,
+    # `A` and `A^T` share their singular values, so both or neither are 0/1.
+    partial_isometry_tag,
 ):
 
     @transpose_tags_rules.append
@@ -350,6 +355,8 @@ for tag in (
     negative_semidefinite_tag,
     semidefinite_tag,
     circulant_tag,
+    # The pseudoinverse of a partial isometry is its conjugate transpose.
+    partial_isometry_tag,
 ):
 
     @invert_tags_rules.append
@@ -384,7 +391,7 @@ def invert_tags(tags: frozenset[object]) -> frozenset[object]:
     of that linear operator.
 
     Most structural properties are preserved by inversion (symmetric, diagonal,
-    triangular, positive/negative semidefinite).  Notable exceptions:
+    triangular, positive/negative semidefinite, partial isometry).  Notable exceptions:
 
     - `tridiagonal_tag` is **not** preserved — the inverse of a tridiagonal matrix
       is generally dense.

@@ -51,6 +51,7 @@ from .base import (
     is_lower_triangular,
     is_materialised,
     is_negative_semidefinite,
+    is_partial_isometry,
     is_positive_semidefinite,
     is_symmetric,
     is_tridiagonal,
@@ -469,6 +470,13 @@ def _(operator):
 @rank_range.register(IdentityLinearOperator)
 def _(operator):
     return operator.in_size(), operator.in_size()
+
+
+# Unlike `is_positive_semidefinite`, this does not need matching structures: the
+# identity preserves norms however its input and output are laid out.
+@is_partial_isometry.register(IdentityLinearOperator)
+def _(operator):
+    return True
 
 
 # TODO: refine these. For now we conservatively report Diagonal, Tridiagonal and

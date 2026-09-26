@@ -756,6 +756,93 @@ def test_semidefinite_tag_propagation(getkey):
     assert scale_by_traced(op, jnp.asarray(-3.0))
 
 
+def test_partial_isometry_tag_propagation(getkey):
+    tag = lx.partial_isometry_tag
+    # Preserved by transposition and by (pseudo)inversion, whose result is `A^H`.
+    assert tag in lx.transpose_tags(frozenset({tag}))
+    assert tag in lx.invert_tags(frozenset({tag}))
+
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3), dtype=jnp.complex128))
+    tall = lx.MatrixLinearOperator(q, tag)  # orthonormal columns
+    assert lx.is_partial_isometry(tall)
+    assert not lx.is_partial_isometry(lx.MatrixLinearOperator(q))
+    assert tag in lx.tags_from_checks(tall)
+    assert tag not in lx.tags_from_checks(lx.MatrixLinearOperator(q))
+    for op in (tall.T, tall.H, lx.conj(tall), lx.materialise(tall), -tall):
+        assert lx.is_partial_isometry(op)
+    assert lx.is_partial_isometry(
+        lx.TaggedLinearOperator(lx.MatrixLinearOperator(q), tag)
+    )
+    assert lx.is_partial_isometry(lx.TaggedLinearOperator(tall, lx.MaxRankTag(3)))
+    assert lx.is_partial_isometry(
+        lx.invert(tall, lx.AutoLinearSolver(well_posed=False))
+    )
+
+    # Scaling preserves it only by a static unit-modulus scalar (or zero, which gives
+    # the zero operator).
+    assert lx.is_partial_isometry(tall * 1j)
+    assert lx.is_partial_isometry(tall * -1.0)
+    assert lx.is_partial_isometry(tall / 1j)
+    assert lx.is_partial_isometry(tall * 0.0)
+    assert not lx.is_partial_isometry(tall * 2.0)
+    assert not lx.is_partial_isometry(tall / 2.0)
+
+    @jax.jit
+    def scale_by_traced(scalar):
+        assert not lx.is_partial_isometry(tall * scalar)
+        assert not lx.is_partial_isometry(tall / scalar)
+        return scalar
+
+    scale_by_traced(jnp.asarray(1.0))
+
+    # The identity is one, whatever its input and output structures.
+    struct = jax.ShapeDtypeStruct((4,), jnp.float64)
+    other = {"a": jax.ShapeDtypeStruct((2, 2), jnp.float64)}
+    assert lx.is_partial_isometry(lx.IdentityLinearOperator(struct))
+    assert lx.is_partial_isometry(lx.IdentityLinearOperator(struct, other))
+
+    # Neither sums nor tangents are partial isometries in general, nor structured
+    # operators, whose values the tag check does not inspect.
+    assert not lx.is_partial_isometry(tall + tall)
+    assert not lx.is_partial_isometry(TangentLinearOperator(tall, tall))
+    assert not lx.is_partial_isometry(lx.DiagonalLinearOperator(jnp.ones(3)))
+
+
+def test_partial_isometry_composition(getkey):
+    tag = lx.partial_isometry_tag
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 5)))
+    # Without a rank bound, neither factor is known injective or surjective, and the
+    # product need not be a partial isometry: two projectors onto non-orthogonal lines
+    # compose to a contraction.
+    u = jnp.array([1.0, 0.0])
+    v = jnp.array([1.0, 1.0]) / jnp.sqrt(2.0)
+    p_u = lx.MatrixLinearOperator(jnp.outer(u, u), tag)
+    p_v = lx.MatrixLinearOperator(jnp.outer(v, v), tag)
+    assert not lx.is_partial_isometry(p_u @ p_v)
+    assert jnp.allclose(jnp.linalg.svd((p_u @ p_v).as_matrix())[1][0], jnp.sqrt(0.5))
+
+    square = lx.MatrixLinearOperator(q, tag)
+    assert not lx.is_partial_isometry(square @ square)
+    orthogonal = lx.MatrixLinearOperator(q, (tag, lx.RankTag(5)))
+    assert lx.is_partial_isometry(orthogonal @ orthogonal)
+
+    # An isometry (injective) first factor, or a co-isometry (surjective) second
+    # factor, suffices; the other factor may be any partial isometry.
+    isometry = lx.MatrixLinearOperator(q[:, :3], (tag, lx.RankTag(3)))  # 5x3
+    projector = lx.MatrixLinearOperator(jnp.diag(jnp.array([1.0, 1.0, 0.0])), tag)
+    assert lx.is_partial_isometry(isometry @ projector)  # injective first
+    assert lx.is_partial_isometry(projector @ isometry.T)  # surjective second
+    assert not lx.is_partial_isometry(projector @ projector)  # rank unknown
+    for op in (isometry @ projector, projector @ isometry.T):
+        s = jnp.linalg.svd(op.as_matrix(), compute_uv=False)
+        assert jnp.allclose(s[s > 1e-8], 1.0)
+
+    # Composing with the identity preserves it.
+    identity = lx.IdentityLinearOperator(jax.ShapeDtypeStruct((5,), jnp.float64))
+    assert lx.is_partial_isometry(identity @ square)
+    assert lx.is_partial_isometry(square @ identity)
+
+
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_is_tridiagonal(dtype, getkey):
     diag1 = jr.normal(getkey(), (5,), dtype=dtype)

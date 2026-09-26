@@ -35,6 +35,7 @@ from ._operator import (
     IdentityLinearOperator,
     is_full_rank,
     is_hermitian,
+    is_partial_isometry,
     linearise,
     max_rank,
     TaggedLinearOperator,
@@ -403,6 +404,29 @@ def _check_rank_compat(
             )
 
 
+def _partial_isometry_fast_path(
+    solver: "AbstractLinearSolver", operator: AbstractLinearOperator
+) -> bool:
+    """Whether to bypass `solver` for `operator` as a partial isometry: its
+    pseudoinverse is its conjugate transpose, and its (pseudo)determinant has unit
+    modulus, so neither needs a factorisation.
+
+    An `IdentityLinearOperator` always takes this path. Any other partial isometry
+    takes it only if the choice of solver was left to `AutoLinearSolver`: an explicitly
+    chosen solver is used as given. Raises if the solver would have rejected the
+    operator statically anyway.
+    """
+    if isinstance(operator, IdentityLinearOperator):
+        return True
+    if not (isinstance(solver, AutoLinearSolver) and is_partial_isometry(operator)):
+        return False
+    # For its static checks only, e.g. `well_posed=True` rejecting a non-square
+    # operator.
+    solver.select_solver(operator)
+    _check_rank_compat(solver, operator)
+    return True
+
+
 @eqx.filter_jit
 def linear_solve(
     operator: AbstractLinearOperator,
@@ -525,13 +549,16 @@ def linear_solve(
             f"{vector_struct} and an operator with out-structure "
             f"{operator_out_structure}"
         )
-    if isinstance(operator, IdentityLinearOperator):
-        # The inverse of an `IdentityLinearOperator` is its transpose: it is square, so
-        # this is just the same operator with its input and output structures swapped.
-        # (Which matters when those structures are laid out differently: the solution
-        # must have the operator's in-structure, not its out-structure.)
+    if _partial_isometry_fast_path(solver, operator):
+        # The pseudoinverse of a partial isometry is its conjugate transpose, so no
+        # factorisation is needed. (For an `IdentityLinearOperator` this is just the
+        # same operator with its input and output structures swapped, which matters
+        # when those are laid out differently: the solution must have the operator's
+        # in-structure, not its out-structure.) Differentiating through `A^H` directly
+        # is exact for tangents that keep `A` a partial isometry, i.e. that respect the
+        # tag -- as for any other tag.
         return Solution(
-            value=operator.T.mv(vector),
+            value=operator.H.mv(vector),
             result=RESULTS.successful,
             state=state,
             stats={},
@@ -600,7 +627,9 @@ def invert(
         options = {}
 
     _check_rank_compat(solver, operator)
-    if state == sentinel:
+    # A partial isometry is solved by `linear_solve`'s fast path, which never touches
+    # the state, so don't factorise it.
+    if state == sentinel and not _partial_isometry_fast_path(solver, operator):
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
         stopped_operator = eqx.combine(
             lax.stop_gradient(dynamic_operator), static_operator

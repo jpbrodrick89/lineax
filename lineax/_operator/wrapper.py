@@ -32,6 +32,7 @@ from .._tags import (
     hermitian_tag,
     lower_triangular_tag,
     negative_semidefinite_tag,
+    partial_isometry_tag,
     positive_semidefinite_tag,
     semidefinite_tag,
     symmetric_tag,
@@ -57,6 +58,7 @@ from .base import (
     is_lower_triangular,
     is_materialised,
     is_negative_semidefinite,
+    is_partial_isometry,
     is_positive_semidefinite,
     is_semidefinite,
     is_symmetric,
@@ -375,7 +377,9 @@ def _(operator):
 # tangent of a curve of, say, tridiagonal operators is tridiagonal. Definiteness and a
 # unit diagonal do not transfer: the tangent of a unit-diagonal family has a *zero*
 # diagonal, and the tangent of a positive semidefinite family need not be semidefinite
-# of either sign.
+# of either sign. Nor does being a partial isometry: the tangent of a curve of
+# orthogonal matrices `Q(t)` is `Q Ω` for skew `Ω`, whose singular values are those
+# of `Ω`.
 for check in (
     is_symmetric,
     is_hermitian,
@@ -407,6 +411,7 @@ for check in (
     is_positive_semidefinite,
     is_negative_semidefinite,
     is_semidefinite,
+    is_partial_isometry,
 ):
 
     @check.register(TangentLinearOperator)  # pyright: ignore
@@ -480,6 +485,35 @@ def _(operator):
     if not isinstance(scalar, (int, float, np.ndarray, np.generic)):
         return False
     return float(scalar) == 1.0 and has_unit_diagonal(operator.operator)
+
+
+def _scalar_abs(scalar) -> float | None:
+    """Returns the absolute value of a scalar, or `None` for JAX tracers."""
+    if isinstance(scalar, (int, float, complex, np.ndarray, np.generic)):
+        return abs(complex(scalar))
+    return None
+
+
+# Being a partial isometry is preserved by negation, and by scaling by a unit-modulus
+# scalar (real or complex). Multiplying by zero gives the zero operator, which is
+# vacuously a partial isometry (it has no nonzero singular values).
+@is_partial_isometry.register(NegLinearOperator)
+def _(operator):
+    return is_partial_isometry(operator.operator)
+
+
+@is_partial_isometry.register(MulLinearOperator)
+def _(operator):
+    scalar_abs = _scalar_abs(operator.scalar)
+    if scalar_abs == 0:
+        return True
+    return scalar_abs == 1 and is_partial_isometry(operator.operator)
+
+
+@is_partial_isometry.register(DivLinearOperator)
+def _(operator):
+    scalar_abs = _scalar_abs(operator.scalar)
+    return scalar_abs == 1 and is_partial_isometry(operator.operator)
 
 
 class _ScalarSign(enum.Enum):
@@ -594,6 +628,7 @@ for check, tag in (
     (is_negative_semidefinite, negative_semidefinite_tag),
     (is_tridiagonal, tridiagonal_tag),
     (is_circulant, circulant_tag),
+    (is_partial_isometry, partial_isometry_tag),
 ):
 
     @check.register(TaggedLinearOperator)

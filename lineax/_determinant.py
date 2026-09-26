@@ -25,10 +25,14 @@ from ._operator import (
     AbstractLinearOperator,
     IdentityLinearOperator,
     in_dtype,
+    is_negative_semidefinite,
+    is_positive_semidefinite,
+    is_semidefinite,
+    rank_range,
     TangentLinearOperator,
     trace,
 )
-from ._solve import AbstractDirectLinearSolver, invert
+from ._solve import _partial_isometry_fast_path, AbstractDirectLinearSolver, invert
 from ._solver import AutoLinearSolver
 from ._solver.circulant import Circulant
 from ._solver.normal import Normal
@@ -55,6 +59,32 @@ def _det_sign_error_msg(
         "For non-Hermitian rank-deficient matrices, lineax does not support "
         "pseudodeterminant sign recovery; use `jnp.linalg.eig` directly."
     )
+
+
+def _semidefinite_partial_isometry_slogdet(
+    operator: AbstractLinearOperator,
+) -> tuple[Array, Array]:
+    """`slogdet` of a semidefinite partial isometry, without a factorisation.
+
+    Its eigenvalues are all in `{0, 1}` (an orthogonal projector) or all in `{0, -1}`
+    (a negated one), so `logabsdet` is zero, and the sign is `1`, or `(-1)**rank` in the
+    negative case -- matching what `HEVD` would return. When the sign or the rank is
+    not known statically, `trace(operator) = ±rank` recovers both from the diagonal
+    alone.
+    """
+    dtype = in_dtype(operator)
+    logabsdet = jnp.zeros((), dtype=jnp.finfo(dtype).dtype)
+    if isinstance(operator, IdentityLinearOperator) or is_positive_semidefinite(
+        operator
+    ):
+        return jnp.ones((), dtype=dtype), logabsdet
+    lo, hi = rank_range(operator)
+    if is_negative_semidefinite(operator) and lo == hi:
+        return jnp.asarray((-1) ** lo, dtype=dtype), logabsdet
+    t = jnp.real(trace(operator))
+    odd_rank = jnp.round(jnp.abs(t)) % 2 == 1
+    sign = jnp.where((t < 0) & odd_rank, -1, 1).astype(dtype)
+    return sign, logabsdet
 
 
 def _jvp_through_state(
@@ -182,6 +212,12 @@ def slogdet(
     A 2-tuple of `(sign, logabsdet)`. `sign` is `nan` when the solver cannot
     recover it cheaply (e.g. [`lineax.SVD`][] on a full-rank square matrix, or
     [`lineax.Normal`][]).
+
+    With [`lineax.AutoLinearSolver`][], an operator tagged
+    [`lineax.partial_isometry_tag`][] has `logabsdet` exactly `0`. The `sign` still
+    comes from the solver it selects, unless the operator is also semidefinite (e.g.
+    an orthogonal projector), when it is read off its trace. So if only `logabsdet` is
+    used under JIT, no factorisation is computed at all.
     """
     if not isinstance(solver, AbstractDirectLinearSolver | Normal):
         raise TypeError(
@@ -192,9 +228,17 @@ def slogdet(
         )
     if options is None:
         options = {}
-    if isinstance(operator, IdentityLinearOperator):
-        dtype = in_dtype(operator)
-        return jnp.ones((), dtype=dtype), jnp.zeros((), dtype=dtype)
+    partial_isometry = _partial_isometry_fast_path(solver, operator)
+    # Every nonzero singular value of a partial isometry is one, so its
+    # (pseudo)determinant has unit modulus. Its sign is cheap only if it is also
+    # semidefinite (the identity included): a reflection has determinant -1, and a
+    # unitary operator any unit complex number. Deferring to the solver for those costs
+    # nothing extra when only `logabsdet` is used, but would for a rank-deficient
+    # semidefinite one: `HEVD` needs every eigenvalue for the sign.
+    if partial_isometry and (
+        isinstance(operator, IdentityLinearOperator) or is_semidefinite(operator)
+    ):
+        return _semidefinite_partial_isometry_slogdet(operator)
     # For the solvers whose own `slogdet` we differentiate, the state is the thing
     # being differentiated, so it has to reach `_slogdet` with its tangent intact --
     # both the `stop_gradient` and the `nondifferentiable` guard below would sever it.
@@ -212,7 +256,14 @@ def slogdet(
         dynamic_state, static_state = eqx.partition(state, eqx.is_array)
         state = eqx.combine(lax.stop_gradient(dynamic_state), static_state)
         state = eqxi.nondifferentiable(state, name="`lx.slogdet` state")
-    return _slogdet(operator, solver, options, state)
+    sign, logabsdet = _slogdet(operator, solver, options, state)
+    if partial_isometry:
+        # Otherwise the sign still takes the solver, but `logabsdet` is exactly zero.
+        # Returning a constant here (rather than the solver's own, numerically
+        # near-zero, value) means that under JIT, a caller that uses only `logabsdet`
+        # leaves the factorisation dead, and XLA eliminates it.
+        logabsdet = jnp.zeros_like(logabsdet)
+    return sign, logabsdet
 
 
 def determinant(

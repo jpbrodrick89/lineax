@@ -33,12 +33,14 @@ from .base import (
     is_lower_triangular,
     is_materialised,
     is_negative_semidefinite,
+    is_partial_isometry,
     is_positive_semidefinite,
     is_symmetric,
     is_tridiagonal,
     is_upper_triangular,
     linearise,
     materialise,
+    min_rank,
     rank_range,
     tridiagonal,
 )
@@ -378,6 +380,23 @@ def _(operator):
     # the inner dimension.
     inner_dim = operator.operator1.in_size()
     return max(0, lo1 + lo2 - inner_dim), min(hi1, hi2)
+
+
+# A product of partial isometries need not be one (two orthogonal projectors onto
+# non-orthogonal lines compose to a contraction), but it is when either the first
+# factor is injective or the second is surjective. A full-column-rank partial isometry
+# `A` is an isometry, `A^H A = I`, so `(AB)^H (AB) = B^H B` is an orthogonal projector;
+# and a full-row-rank `B` has `B B^H = I`, so `(AB)(AB)^H = A A^H` is.
+@is_partial_isometry.register(ComposedLinearOperator)
+def _(operator):
+    op1, op2 = operator.operator1, operator.operator2
+    if not (is_partial_isometry(op1) and is_partial_isometry(op2)):
+        return False
+    return min_rank(op1) == op1.in_size() or min_rank(op2) == op2.out_size()
+
+
+# Sums of partial isometries are not partial isometries in general (e.g. `I + I`), so
+# `AddLinearOperator` falls through to the default `False`.
 
 
 @conj.register(AddLinearOperator)

@@ -36,7 +36,7 @@ from .._misc import (
     default_floating_dtype,
     strip_weak_dtype,
 )
-from .._tags import RankRangeTag
+from .._tags import partial_isometry_tag, RankRangeTag
 
 
 def as_frozenset(x: object | Iterable[object]) -> frozenset[object]:
@@ -867,3 +867,31 @@ def is_full_rank(operator: AbstractLinearOperator) -> bool:
 
 # All public API operators use default rank_range except for IdentityLinearOperator
 # (always full rank) and TaggedLinearOperator
+
+
+@ft.singledispatch
+def is_partial_isometry(operator: AbstractLinearOperator) -> bool:
+    """Returns whether an operator is marked as a partial isometry, i.e. whether its
+    nonzero singular values are all equal to one.
+
+    See [`lineax.partial_isometry_tag`][] and
+    [the documentation on linear operator tags](../api/tags.md) for more information.
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    Either `True` or `False.`
+    """
+    # Like `rank_range`, this deliberately does **not** raise `NotImplementedError` for
+    # unregistered types: reading the tag off any `.tags` the operator has is correct
+    # for every operator that stores its properties that way (including third-party
+    # subclasses written before this check existed), and `False` is a correct
+    # (conservative) answer for the rest.
+    return partial_isometry_tag in getattr(operator, "tags", ())
+
+
+# The core operators use the default `is_partial_isometry`; IdentityLinearOperator, the
+# wrappers and the compositions register their own.
