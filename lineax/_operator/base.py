@@ -36,7 +36,7 @@ from .._misc import (
     default_floating_dtype,
     strip_weak_dtype,
 )
-from .._tags import MaxRankTag
+from .._tags import RankRangeTag
 
 
 def as_frozenset(x: object | Iterable[object]) -> frozenset[object]:
@@ -764,23 +764,24 @@ def conj(operator: AbstractLinearOperator) -> AbstractLinearOperator:
     _default_not_implemented("conj", operator)
 
 
-# max_rank
+# rank_range
 
 
 @ft.singledispatch
-def max_rank(operator: AbstractLinearOperator) -> int:
-    """Returns the maximum possible rank of the linear operator.
+def rank_range(operator: AbstractLinearOperator) -> tuple[int, int]:
+    """Returns the tightest known bounds `(lo, hi)` on the rank of the linear operator,
+    i.e. `lo <= rank(operator) <= hi`.
 
-    Maximum possible rank is inferred from:
+    The bounds are inferred from:
 
-    - Shape: `min(out_size, in_size)`
-    - User-provided tags: i.e. `MaxRankTag(r)`
-    - Composition rules: e.g. `max_rank(A @ B) = min(max_rank(A), max_rank(B))`
+    - Shape: `0 <= rank <= min(out_size, in_size)`
+    - User-provided tags: i.e. [`lineax.RankRangeTag`][], as constructed by
+        [`lineax.MaxRankTag`][], [`lineax.MinRankTag`][] and [`lineax.RankTag`][].
+    - Composition rules: e.g. `hi(A @ B) = min(hi(A), hi(B))`, and Sylvester's rank
+        inequality `lo(A @ B) = max(0, lo(A) + lo(B) - k)` for inner dimension `k`.
 
-    The tightest bound is always returned.
-
-    The return value is a plain Python `int` (never a JAX tracer), suitable
-    for use in solver-dispatch control flow.
+    See also [`lineax.max_rank`][], [`lineax.min_rank`][] and
+    [`lineax.is_full_rank`][], which are convenience wrappers around this function.
 
     **Arguments:**
 
@@ -788,20 +789,81 @@ def max_rank(operator: AbstractLinearOperator) -> int:
 
     **Returns:**
 
-    A non-negative integer. This is `0` for known zero operators
+    A 2-tuple `(lo, hi)` of plain Python `int`s (never JAX tracers), suitable for use
+    in solver-dispatch control flow, satisfying
+    `0 <= lo <= hi <= min(out_size, in_size)`. `hi` is `0` for known zero operators
     (e.g. multiplication by a static zero scalar).
     """
     # Unlike the boolean `is_*` tag-checking functions, this deliberately
     # does **not** raise `NotImplementedError` for unregistered types.
-    # `min(out_size, in_size)` is a correct (conservative) answer for any
+    # `(0, min(out_size, in_size))` is a correct (conservative) answer for any
     # linear operator, so third-party subclasses that do not register a
     # dispatch still produce a valid result.
     dim_bound = min(operator.out_size(), operator.in_size())
     tags = getattr(operator, "tags", ())
-    bounds = [t.r for t in tags if isinstance(t, MaxRankTag)]
-    if bounds:
-        return min(min(bounds), dim_bound)
-    return dim_bound
+    return _apply_rank_tags(tags, 0, dim_bound)
 
 
-# All public API operators use default max_rank except for TaggedLinearOperator
+def _apply_rank_tags(tags, lo: int, hi: int) -> tuple[int, int]:
+    """Narrows the range `[lo, hi]` by any `RankRangeTag`s in `tags`."""
+    for tag in tags:
+        if isinstance(tag, RankRangeTag):
+            lo = max(lo, tag.lo)
+            if tag.hi is not None:
+                hi = min(hi, tag.hi)
+    # A contradictory tag shouldn't crash `rank_range` itself: clamp, and let the
+    # solvers' rank checks surface the actual problem at solve time.
+    return min(lo, hi), hi
+
+
+def max_rank(operator: AbstractLinearOperator) -> int:
+    """Returns the maximum possible rank of the linear operator. This is the upper
+    bound returned by [`lineax.rank_range`][].
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    A non-negative plain Python `int` (never a JAX tracer). This is `0` for known zero
+    operators (e.g. multiplication by a static zero scalar).
+    """
+    return rank_range(operator)[1]
+
+
+def min_rank(operator: AbstractLinearOperator) -> int:
+    """Returns a guaranteed lower bound on the rank of the linear operator. This is the
+    lower bound returned by [`lineax.rank_range`][].
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    A non-negative plain Python `int` (never a JAX tracer).
+    """
+    return rank_range(operator)[0]
+
+
+def is_full_rank(operator: AbstractLinearOperator) -> bool:
+    """Returns whether the linear operator is statically known to be full rank, i.e.
+    whether `min_rank(operator) == min(operator.in_size(), operator.out_size())`.
+
+    `False` means only that full rank is not *known*, not that the operator is
+    rank-deficient.
+
+    **Arguments:**
+
+    - `operator`: a linear operator.
+
+    **Returns:**
+
+    A plain Python `bool`.
+    """
+    return min_rank(operator) == min(operator.in_size(), operator.out_size())
+
+
+# All public API operators use default rank_range except for IdentityLinearOperator
+# (always full rank) and TaggedLinearOperator

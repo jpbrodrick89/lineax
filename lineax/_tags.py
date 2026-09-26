@@ -42,37 +42,48 @@ circulant_tag = _HasRepr("circulant_tag")
 
 
 @dataclasses.dataclass(frozen=True)
-class MaxRankTag:
-    """Marks that an operator's rank is no more than the value given in its argument
-    (`MaxRankTag(r)`). Use [`lineax.max_rank`][] to query the bound.
+class RankRangeTag:
+    """Marks that an operator's rank lies in the closed interval `[lo, hi]`. Use
+    [`lineax.rank_range`][] to query the bounds.
 
-    `MaxRankTag` is preserved through transposition and inversion (rank is invariant
-    under both). It composes through `@` as `min(rank_A, rank_B)` and through `+` as
-    `min(rank_A + rank_B, in_size, out_size)`.
+    `hi=None` means that this tag does not itself constrain the upper bound (beyond the
+    operator's shape); it does *not* mean infinite rank. Prefer the
+    [`lineax.MaxRankTag`][], [`lineax.MinRankTag`][] and [`lineax.RankTag`][]
+    constructors unless you genuinely know both a nontrivial lower *and* upper bound,
+    e.g. `RankRangeTag(lo=3, hi=7)`. All four produce a `RankRangeTag`, so two tags with
+    the same bounds compare equal regardless of which constructor built them.
 
-    `MaxRankTag(0)` is valid, and represents the zero operator.
+    Rank bounds are preserved through transposition and inversion (rank is invariant
+    under both). Multiple rank tags on one operator are combined into the tightest
+    range they imply. They compose through `@` and `+` as:
 
-    !!! Example
-
-        ```python
-        k, n = 5, 100
-        U  = lx.MatrixLinearOperator(jnp.zeros((n, k)), lx.MaxRankTag(k))
-        C  = lx.MatrixLinearOperator(jnp.zeros((k, k)), lx.MaxRankTag(k))
-        Vt = lx.MatrixLinearOperator(jnp.zeros((k, n)), lx.MaxRankTag(k))
-
-        update = U @ C @ Vt
-        assert lx.max_rank(update) == k   # propagated automatically through composition
-        ```
+    - `A @ B`: `hi = min(hi_A, hi_B)` and, by Sylvester's rank inequality,
+        `lo = max(0, lo_A + lo_B - k)`, where `k` is the inner dimension.
+    - `A + B`: `hi = min(hi_A + hi_B, in_size, out_size)` and
+        `lo = min(lo_A, lo_B, max(0, lo_A - hi_B, lo_B - hi_A))`. The last term is the
+        reverse triangle inequality for rank; the `min` with `lo_A` and `lo_B` keeps
+        the bound valid at finite `rcond` whichever operand dominates in magnitude.
 
     An operator is considered rank-deficient if
     `lx.max_rank(operator) < min(operator.in_size(), operator.out_size())`. Full-rank
     solvers (e.g. `lx.AutoLinearSolver(well_posed=None/True)`) will raise a `ValueError`
     if asked to solve a rank-deficient system. Rank-deficient solvers MAY make internal
-    optimisations based on [`lineax.max_rank`][]. For example, tagging `MaxRankTag(r)`
-    and solving with [`lineax.SVD`][] will truncate to the `r` largest singular values
-    after decomposition. As such, correctness may be impacted to the extent that an
-    operator's actual rank exceeds `max_rank` (in exactly the same way that specifying
-    an overly high `rcond` in the solver might).
+    optimisations based on [`lineax.rank_range`][]:
+
+    - Upper bound: tagging `MaxRankTag(r)` and solving with [`lineax.SVD`][] will
+        truncate to the `r` largest singular values after decomposition. As such,
+        correctness may be impacted to the extent that an operator's actual rank exceeds
+        `max_rank` (in exactly the same way that specifying an overly high `rcond` in
+        the solver might). If a discarded singular value is above the `rcond` threshold,
+        an error is raised instead.
+    - Lower bound: [`lineax.SVD`][], [`lineax.HEVD`][], and (with `well_posed=False`)
+        [`lineax.Diagonal`][] and [`lineax.Circulant`][] raise an error if fewer than
+        `min_rank` singular values/eigenvalues lie above the `rcond` threshold. If the
+        operator is known to be full rank ([`lineax.is_full_rank`][]) then they also
+        skip masking the spectrum at solve time, as do [`lineax.SVD`][] and
+        [`lineax.HEVD`][] whenever the rank is known exactly. Note that this means a
+        full-rank-tagged but numerically ill-conditioned operator raises an error,
+        rather than being silently truncated as an untagged operator would be.
 
     !!! info
 
@@ -92,19 +103,114 @@ class MaxRankTag:
 
     **Arguments:**
 
-    - `r`: non-negative integer upper bound on the rank.
+    - `lo`: non-negative integer lower bound on the rank. Defaults to `0`.
+    - `hi`: integer upper bound on the rank, at least `lo`, or `None` to leave the upper
+        bound unconstrained. Defaults to `None`.
     """
 
-    r: int
+    lo: int = 0
+    hi: int | None = None
 
     def __post_init__(self):
-        if not isinstance(self.r, int) or self.r < 0:
+        if not isinstance(self.lo, int) or self.lo < 0:
             raise ValueError(
-                f"MaxRankTag.r must be a non-negative integer, got {self.r!r}"
+                f"RankRangeTag.lo must be a non-negative integer, got {self.lo!r}"
+            )
+        if self.hi is not None and (not isinstance(self.hi, int) or self.hi < self.lo):
+            raise ValueError(
+                "RankRangeTag.hi must be an integer >= lo, got "
+                f"hi={self.hi!r}, lo={self.lo!r}"
             )
 
     def __repr__(self):
-        return f"max_rank_tag({self.r})"
+        if self.lo == self.hi:
+            return f"rank_tag({self.lo})"
+        if self.hi is None:
+            if self.lo == 0:
+                return "rank_range_tag()"
+            return f"min_rank_tag({self.lo})"
+        if self.lo == 0:
+            return f"max_rank_tag({self.hi})"
+        return f"rank_range_tag({self.lo}, {self.hi})"
+
+
+def MaxRankTag(r: int) -> RankRangeTag:
+    """Marks that an operator's rank is no more than `r`. Shorthand for
+    `RankRangeTag(hi=r)`; see [`lineax.RankRangeTag`][] for how rank bounds are
+    propagated and used. Use [`lineax.max_rank`][] to query the bound.
+
+    `MaxRankTag(0)` is valid, and represents the zero operator.
+
+    !!! Example
+
+        ```python
+        k, n = 5, 100
+        U  = lx.MatrixLinearOperator(jnp.zeros((n, k)), lx.MaxRankTag(k))
+        C  = lx.MatrixLinearOperator(jnp.zeros((k, k)), lx.MaxRankTag(k))
+        Vt = lx.MatrixLinearOperator(jnp.zeros((k, n)), lx.MaxRankTag(k))
+
+        update = U @ C @ Vt
+        assert lx.max_rank(update) == k   # propagated automatically through composition
+        ```
+
+    **Arguments:**
+
+    - `r`: non-negative integer upper bound on the rank.
+    """
+    return RankRangeTag(hi=r)
+
+
+def MinRankTag(r: int) -> RankRangeTag:
+    """Marks that an operator's rank is at least `r`. Shorthand for
+    `RankRangeTag(lo=r)`; see [`lineax.RankRangeTag`][] for how rank bounds are
+    propagated and used. Use [`lineax.min_rank`][] to query the bound.
+
+    !!! Example
+
+        ```python
+        k, n = 5, 100
+        U  = lx.MatrixLinearOperator(jax.random.normal(key1, (n, k)), lx.RankTag(k))
+        Vt = lx.MatrixLinearOperator(jax.random.normal(key2, (k, n)), lx.MinRankTag(k))
+
+        assert lx.rank_range(U @ Vt) == (k, k)   # Sylvester: k + k - k <= rank <= k
+        assert lx.rank_range(U.T) == (k, k)      # transposition preserves rank
+        partial = lx.MatrixLinearOperator(
+            jax.random.normal(key3, (n, n)), lx.RankRangeTag(3, 7)
+        )
+        assert lx.rank_range(partial) == (3, 7)
+        ```
+
+    **Arguments:**
+
+    - `r`: non-negative integer lower bound on the rank.
+    """
+    return RankRangeTag(lo=r)
+
+
+def RankTag(r: int) -> RankRangeTag:
+    """Marks that an operator's rank is exactly `r`. Shorthand for
+    `RankRangeTag(lo=r, hi=r)`; see [`lineax.RankRangeTag`][] for how rank bounds are
+    propagated and used.
+
+    **Arguments:**
+
+    - `r`: the non-negative integer rank.
+    """
+    return RankRangeTag(lo=r, hi=r)
+
+
+def _combine_rank_tags(tags: frozenset[object]) -> RankRangeTag | None:
+    rank_tags = [t for t in tags if isinstance(t, RankRangeTag)]
+    if not rank_tags:
+        return None
+    lo = max(t.lo for t in rank_tags)
+    his = [t.hi for t in rank_tags if t.hi is not None]
+    hi = min(his) if his else None
+    # Contradictory tags (`lo > hi`) are a user error that the solvers' rank checks
+    # surface at solve time; don't fail tag propagation over them.
+    if hi is not None:
+        lo = min(lo, hi)
+    return RankRangeTag(lo, hi)
 
 
 def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
@@ -139,7 +245,7 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
         is_symmetric,
         is_tridiagonal,
         is_upper_triangular,
-        max_rank,
+        rank_range,
     )
 
     tags: set[object] = {
@@ -160,10 +266,10 @@ def tags_from_checks(operator: "AbstractLinearOperator") -> frozenset[object]:
         if check(operator)
     }
     dim_bound = min(operator.in_size(), operator.out_size())
-    mr = max_rank(operator)
-    # verify that adding a max rank tag wouldn't be redundant
-    if mr < dim_bound:
-        tags.add(MaxRankTag(mr))
+    lo, hi = rank_range(operator)
+    # verify that adding a rank tag wouldn't be redundant
+    if lo > 0 or hi < dim_bound:
+        tags.add(RankRangeTag(lo, hi))
     return frozenset(tags)
 
 
@@ -200,12 +306,9 @@ def _(tags: frozenset[object]):
         return lower_triangular_tag
 
 
-@transpose_tags_rules.append
-def _(tags: frozenset[object]):
-    rank_tags = [t for t in tags if isinstance(t, MaxRankTag)]
-    if rank_tags:
-        # drop redundant tags
-        return min(rank_tags, key=lambda t: t.r)
+# Rank bounds are invariant under transposition. Multiple rank tags are combined into
+# the single tightest one.
+transpose_tags_rules.append(_combine_rank_tags)
 
 
 def transpose_tags(tags: frozenset[object]):
@@ -265,12 +368,8 @@ def _(tags: frozenset[object]):
         return unit_diagonal_tag
 
 
-@invert_tags_rules.append
-def _(tags: frozenset[object]):
-    rank_tags = [t for t in tags if isinstance(t, MaxRankTag)]
-    if rank_tags:
-        # drop redundant tags
-        return min(rank_tags, key=lambda t: t.r)
+# Rank bounds are invariant under (pseudo)inversion.
+invert_tags_rules.append(_combine_rank_tags)
 
 
 # tridiagonal_tag intentionally absent: inverse of tridiagonal matrix generally dense.

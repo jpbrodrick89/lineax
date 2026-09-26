@@ -143,5 +143,17 @@ For example, the default solver for [`lineax.linear_solve`][] uses this to dispa
 ---
 
 ::: lineax.MaxRankTag
+
+---
+
+::: lineax.MinRankTag
+
+---
+
+::: lineax.RankTag
+
+---
+
+::: lineax.RankRangeTag
     options:
       members: false

@@ -21,6 +21,7 @@ from .base import (
     in_dtype as in_dtype,
     is_circulant as is_circulant,
     is_diagonal as is_diagonal,
+    is_full_rank as is_full_rank,
     is_hermitian as is_hermitian,
     is_lower_triangular as is_lower_triangular,
     is_negative_semidefinite as is_negative_semidefinite,
@@ -32,6 +33,8 @@ from .base import (
     linearise as linearise,
     materialise as materialise,
     max_rank as max_rank,
+    min_rank as min_rank,
+    rank_range as rank_range,
     trace as trace,
     tridiagonal as tridiagonal,
 )

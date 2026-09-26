@@ -31,7 +31,6 @@ from .._tags import (
     diagonal_tag,
     hermitian_tag,
     lower_triangular_tag,
-    MaxRankTag,
     negative_semidefinite_tag,
     positive_semidefinite_tag,
     semidefinite_tag,
@@ -42,6 +41,7 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
+    _apply_rank_tags,
     AbstractLinearOperator,
     as_frozenset,
     conj,
@@ -64,7 +64,7 @@ from .base import (
     is_upper_triangular,
     linearise,
     materialise,
-    max_rank,
+    rank_range,
     tridiagonal,
     tridiagonal_via_coloring,
 )
@@ -391,13 +391,15 @@ for check in (
         return check(operator.primal)
 
 
-@max_rank.register(TangentLinearOperator)
+@rank_range.register(TangentLinearOperator)
 def _(operator):
     # A rank bound doubles rather than transfers: writing the family as
     # `A(t) = U(t) V(t)^T` with rank <= k, the tangent is `dU V^T + U dV^T`, of rank
     # up to `2k` -- equivalently, a limit of differences of two rank-<=k matrices.
+    # A lower bound does not transfer at all: the tangent may be zero.
     dim_bound = min(operator.out_size(), operator.in_size())
-    return min(dim_bound, 2 * max_rank(operator.primal))
+    _, hi = rank_range(operator.primal)
+    return 0, min(dim_bound, 2 * hi)
 
 
 for check in (
@@ -560,19 +562,26 @@ def _(operator):
     return is_positive_semidefinite(operator.operator)
 
 
-# Multiplying an operator by a scalar  preserves its rank
-# unless the scalar is statically known to be zero
-@max_rank.register(MulLinearOperator)
+# Multiplying an operator by a scalar preserves its rank unless the scalar is zero. A
+# statically zero scalar gives the zero operator; a traced scalar might be zero at
+# runtime, so only its upper bound transfers.
+@rank_range.register(MulLinearOperator)
 def _(operator):
-    if _scalar_sign(operator.scalar) is _ScalarSign.zero:
-        return 0
-    return max_rank(operator.operator)
+    sign = _scalar_sign(operator.scalar)
+    if sign is _ScalarSign.zero:
+        return 0, 0
+    lo, hi = rank_range(operator.operator)
+    if sign is _ScalarSign.unknown:
+        return 0, hi
+    return lo, hi
 
 
-@max_rank.register(DivLinearOperator)
-@max_rank.register(NegLinearOperator)
+# Dividing by a scalar preserves rank (a zero scalar would not give a linear operator
+# at all), as does negation.
+@rank_range.register(DivLinearOperator)
+@rank_range.register(NegLinearOperator)
 def _(operator):
-    return max_rank(operator.operator)
+    return rank_range(operator.operator)
 
 
 for check, tag in (
@@ -628,11 +637,9 @@ def _(operator):
     return False
 
 
-@max_rank.register(TaggedLinearOperator)
+@rank_range.register(TaggedLinearOperator)
 def _(operator):
-    inner = max_rank(operator.operator)
-    bounds = [t.r for t in operator.tags if isinstance(t, MaxRankTag)]
-    return min(min(bounds), inner) if bounds else inner
+    return _apply_rank_tags(operator.tags, *rank_range(operator.operator))
 
 
 # conj

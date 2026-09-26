@@ -57,6 +57,7 @@ from .base import (
     is_upper_triangular,
     linearise,
     materialise,
+    rank_range,
     tridiagonal,
 )
 
@@ -461,6 +462,13 @@ def _(operator):
 @is_negative_semidefinite.register(IdentityLinearOperator)
 def _(operator):
     return False
+
+
+# The identity is a bijection (its input and output sizes always agree), so it is
+# always full rank.
+@rank_range.register(IdentityLinearOperator)
+def _(operator):
+    return operator.in_size(), operator.in_size()
 
 
 # TODO: refine these. For now we conservatively report Diagonal, Tridiagonal and

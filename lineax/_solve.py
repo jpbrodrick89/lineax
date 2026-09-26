@@ -240,7 +240,7 @@ def _gram_partner(
         return Cholesky(), (r, jnp.asarray(False))
     packed = pack_structures(gram_operator)
     if isinstance(solver, Circulant):
-        (eigenvalues, is_complex), _ = state
+        (eigenvalues, is_complex, full_rank), _ = state
         # `A = Fᴴ diag(λ) F` => `AᴴA = Fᴴ diag(|λ|²) F`, i.e. `AᴴA` is itself circulant
         # with eigenvalues `|λ|²`. (These are real and nonnegative, matching the PSD tag
         # on `gram_operator`; for a real `A` only half the spectrum is stored, and that
@@ -251,21 +251,23 @@ def _gram_partner(
         # `Circulant.init` would have produced. (The imaginary part is exactly zero.)
         gram_eigenvalues = eigenvalues.conj() * eigenvalues
         gram_solver = Circulant(well_posed=solver.well_posed, rcond=rcond)
-        return gram_solver, ((gram_eigenvalues, is_complex), packed)
+        # Squaring preserves the cutoff, so a full-rank `A` has a full-rank gram too.
+        return gram_solver, ((gram_eigenvalues, is_complex, full_rank), packed)
     if isinstance(solver, SVD):
-        (u, s, vt), rank_bound, _ = state
+        (u, s, vt), ranks, _ = state
         # `(AᴴA)⁺ = V Σ⁻² Vᴴ`.
         eigenvalues, eigenvectors = s**2, vt.conj().T
         rcond = _squared_rcond(solver.rcond, vt.shape[1], u.shape[0], s.dtype)
     else:
-        (w, eigenvectors), rank_bound, _ = state
+        (w, eigenvectors), ranks, _ = state
         # `(AᴴA)⁺ = (A²)⁺ = V W⁻² Vᴴ`.
         eigenvalues = w**2
         m = eigenvectors.shape[0]
         rcond = _squared_rcond(solver.rcond, m, m, w.dtype)
     # Both states hold their retained components as a leading slice ordered by
-    # descending magnitude, which squaring preserves, so the rank bound carries over.
-    return HEVD(rcond=rcond), ((eigenvalues, eigenvectors), rank_bound, packed)
+    # descending magnitude, which squaring preserves. Squaring also preserves the
+    # cutoff (see `_squared_rcond`), so the certified rank range carries over too.
+    return HEVD(rcond=rcond), ((eigenvalues, eigenvectors), ranks, packed)
 
 
 @eqxi.filter_primitive_jvp

@@ -76,4 +76,16 @@ Note that these do *not* inspect the values of the operator -- instead, they use
 
 ---
 
+::: lineax.rank_range
+
+---
+
 ::: lineax.max_rank
+
+---
+
+::: lineax.min_rank
+
+---
+
+::: lineax.is_full_rank

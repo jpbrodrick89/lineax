@@ -22,7 +22,7 @@ import jax.scipy as jsp
 from jaxtyping import Array, PyTree
 
 from .._misc import resolve_rcond
-from .._operator import AbstractLinearOperator, max_rank
+from .._operator import AbstractLinearOperator, rank_range
 from .._solution import RESULTS
 from .base import AbstractDirectLinearSolver
 from .misc import (
@@ -34,18 +34,20 @@ from .misc import (
 )
 
 
-# The static integer is the number of leading singular components that `compute`
-# uses: the operator's declared rank bound. The full decomposition is kept, so that
-# the trailing components (e.g. a null space) remain recoverable.
+# The static pair is the operator's rank range `(lo, hi)`, as certified in `init`.
+# `compute` uses only the leading `hi` singular components, and when `lo == hi` every
+# one of those is known to lie above the rcond cutoff, so it skips masking. The full
+# decomposition is kept, so that the trailing components (e.g. a null space) remain
+# recoverable.
 _SVDState: TypeAlias = tuple[
-    tuple[Array, Array, Array], eqxi.Static[int], PackedStructures
+    tuple[Array, Array, Array], eqxi.Static[tuple[int, int]], PackedStructures
 ]
 
 
 def _retained(state: _SVDState) -> tuple[Array, Array, Array]:
-    (u, s, vt), rank_bound, _ = state
-    r = rank_bound.value
-    return u[:, :r], s[:r], vt[:r, :]
+    (u, s, vt), ranks, _ = state
+    _, hi = ranks.value
+    return u[:, :hi], s[:hi], vt[:hi, :]
 
 
 class SVD(AbstractDirectLinearSolver[_SVDState]):
@@ -66,34 +68,58 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
     def init(self, operator: AbstractLinearOperator, options: dict[str, Any]):
         del options
         u, s, vt = jsp.linalg.svd(operator.as_matrix(), full_matrices=False)
-        # If the operator is known to have rank at most `r`, the trailing
-        # singular values are mathematically zero, so `compute` statically truncates to
-        # the leading `r` components. The state itself is not truncated, as that would
-        # discard the trailing components irrecoverably; if they are never used then
-        # JAX eliminates them as dead code.
-        r = max_rank(operator)
-        if r < s.shape[0]:
-            # `compute` masks out `s_i <= rcond * s[0]`, so dropping the tail is
-            # lossless iff it all sits below that floor (using the same rcond).
-            # Otherwise the `max_rank` claim is false and truncating would change
-            # the solution. `s` is descending, so testing the largest discarded
-            # value `s[r]` certifies the tail.
+        lo, hi = rank_range(operator)
+        if lo > 0 or hi < s.shape[0]:
+            # `compute` masks out `s_i <= rcond * s[0]`, so that is the cutoff that any
+            # claim about the rank is checked against.
+            # (s.size > 0 since 0 < lo <= size or hi < size.)
             m, n = u.shape[0], vt.shape[1]
-            # s.size > 0 since r < size
             rcond = resolve_rcond(self.rcond, n, m, s.dtype) * s[0]
-            s = eqx.error_if(
-                s,
-                s[r] > rcond,
-                "lineax.SVD: the operator was declared (via a `MaxRankTag`, or by "
-                f"composition rules) to have rank at most {r}, but it has a singular "
-                "value above the rcond threshold beyond that rank. Truncating to the "
-                "declared rank would change the solution, so the rank claim appears to "
-                "be incorrect. Remove/loosen the rank tag, increase `rcond` if you "
-                "intend a low-rank approximation, or set `EQX_ON_ERROR=off` to skip "
-                "this check.",
-            )
+            if lo > 0:
+                # If the operator is known to have rank at least `lo`, its leading `lo`
+                # singular values must survive the mask. `s` is descending, so testing
+                # `s[lo - 1]` certifies them all.
+                s = eqx.error_if(
+                    s,
+                    s[lo - 1] <= rcond,
+                    "lineax.SVD: the operator was declared (via a "
+                    "`MinRankTag`/`RankTag`, or by composition rules) to have rank at "
+                    f"least {lo}, but its {lo}-th singular value falls at or below "
+                    "the rcond threshold. Either the rank claim is incorrect, or the "
+                    "operator is too ill-conditioned for its rank to be resolved at "
+                    "this `rcond` (e.g. a composition of individually "
+                    "well-conditioned factors). Remove/loosen the rank tag, decrease "
+                    "`rcond`, or set `EQX_ON_ERROR=off` to skip this check.",
+                )
+            if hi < s.shape[0]:
+                # If the operator is known to have rank at most `hi`, the trailing
+                # singular values are mathematically zero, so `compute` statically
+                # truncates to the leading `hi` components. The state itself is not
+                # truncated, as that would discard the trailing components
+                # irrecoverably; if they are never used then JAX eliminates them as dead
+                # code. Truncating is lossless iff the tail all sits below the cutoff.
+                # Otherwise the `max_rank` claim is false and truncating would change
+                # the solution. `s` is descending, so testing the largest discarded
+                # value `s[hi]` certifies the tail.
+                s = eqx.error_if(
+                    s,
+                    s[hi] > rcond,
+                    "lineax.SVD: the operator was declared (via a `MaxRankTag`/"
+                    f"`RankTag`, or by composition rules) to have rank at most {hi}, "
+                    "but it has a singular value above the rcond threshold beyond "
+                    "that rank. Truncating to the declared rank would change the "
+                    "solution, so the rank claim appears to be incorrect. "
+                    "Remove/loosen the rank tag, increase `rcond` if you intend a "
+                    "low-rank approximation, or set `EQX_ON_ERROR=off` to skip this "
+                    "check.",
+                )
+        # If the rank is known exactly (`lo == hi`) then the `hi` singular values that
+        # `compute` retains are all certified above the cutoff by the checks above, so
+        # it need not mask them. (Note that this means an ill-conditioned operator
+        # tagged as full rank raises an error, rather than being silently truncated as
+        # an untagged one would be.)
         packed_structures = pack_structures(operator)
-        return (u, s, vt), eqxi.Static(r), packed_structures
+        return (u, s, vt), eqxi.Static((lo, hi)), packed_structures
 
     def compute(
         self,
@@ -102,20 +128,26 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
         options: dict[str, Any],
     ) -> tuple[PyTree[Array], RESULTS, dict[str, Any]]:
         del options
-        _, _, packed_structures = state
+        _, ranks, packed_structures = state
         u, s, vt = _retained(state)
         vector = ravel_vector(vector, packed_structures)
-        m, _ = u.shape
-        _, n = vt.shape
-        rcond = resolve_rcond(self.rcond, n, m, s.dtype)
-        rcond = jnp.array(rcond, dtype=s.dtype)
-        if s.size > 0:
-            rcond = rcond * s[0]
-        # Not >=, or this fails with a matrix of all-zeros.
-        mask = s > rcond
-        rank = mask.sum()
-        safe_s = jnp.where(mask, s, 1)
-        s_inv = jnp.where(mask, jnp.array(1.0) / safe_s, 0).astype(u.dtype)
+        lo, hi = ranks.value
+        if lo == hi:
+            # Every retained singular value was certified above the cutoff in `init`.
+            rank = jnp.array(hi, dtype=int)
+            s_inv = (jnp.array(1.0) / s).astype(u.dtype)
+        else:
+            m, _ = u.shape
+            _, n = vt.shape
+            rcond = resolve_rcond(self.rcond, n, m, s.dtype)
+            rcond = jnp.array(rcond, dtype=s.dtype)
+            if s.size > 0:
+                rcond = rcond * s[0]
+            # Not >=, or this fails with a matrix of all-zeros.
+            mask = s > rcond
+            rank = mask.sum()
+            safe_s = jnp.where(mask, s, 1)
+            s_inv = jnp.where(mask, jnp.array(1.0) / safe_s, 0).astype(u.dtype)
         uTb = jnp.matmul(u.conj().T, vector, precision=lax.Precision.HIGHEST)
         solution = jnp.matmul(vt.conj().T, s_inv * uTb, precision=lax.Precision.HIGHEST)
         solution = unravel_solution(solution, packed_structures)
@@ -123,16 +155,16 @@ class SVD(AbstractDirectLinearSolver[_SVDState]):
 
     def transpose(self, state: _SVDState, options: dict[str, Any]):
         del options
-        (u, s, vt), rank_bound, packed_structures = state
+        (u, s, vt), ranks, packed_structures = state
         transposed_packed_structures = transpose_packed_structures(packed_structures)
-        transpose_state = (vt.T, s, u.T), rank_bound, transposed_packed_structures
+        transpose_state = (vt.T, s, u.T), ranks, transposed_packed_structures
         transpose_options = {}
         return transpose_state, transpose_options
 
     def conj(self, state: _SVDState, options: dict[str, Any]):
         del options
-        (u, s, vt), rank_bound, packed_structures = state
-        conj_state = (u.conj(), s, vt.conj()), rank_bound, packed_structures
+        (u, s, vt), ranks, packed_structures = state
+        conj_state = (u.conj(), s, vt.conj()), ranks, packed_structures
         conj_options = {}
         return conj_state, conj_options
 

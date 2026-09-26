@@ -39,7 +39,7 @@ from .base import (
     is_upper_triangular,
     linearise,
     materialise,
-    max_rank,
+    rank_range,
     tridiagonal,
 )
 from .core import try_structured_materialise
@@ -287,12 +287,21 @@ def _(operator):
     return False
 
 
-@max_rank.register(AddLinearOperator)
+@rank_range.register(AddLinearOperator)
 def _(operator):
-    return min(
-        max_rank(operator.operator1) + max_rank(operator.operator2),
-        min(operator.out_size(), operator.in_size()),
-    )
+    lo1, hi1 = rank_range(operator.operator1)
+    lo2, hi2 = rank_range(operator.operator2)
+    hi = min(hi1 + hi2, operator.out_size(), operator.in_size())
+    # Reverse triangle inequality for rank, `rank(A + B) >= |rank(A) - rank(B)|`,
+    # using the lower bound of one operand against the upper bound of the other.
+    exact_lo = max(0, lo1 - hi2, lo2 - hi1)
+    # That bound is exact, but not robust to finite `rcond`: if one operand dominates
+    # in magnitude then the other is swamped, and the numerical rank is only that of
+    # the dominant operand. (E.g. `I + U @ V^T` with a huge rank-1 `U @ V^T` has exact
+    # rank at least `n - 1`, but numerical rank 1.) Which operand dominates is not
+    # known statically, so take a bound that holds in every case.
+    lo = min(lo1, lo2, exact_lo)
+    return lo, hi
 
 
 # These properties ARE preserved under composition.
@@ -361,9 +370,14 @@ def _(operator):
     return (a or b or c) and d and e
 
 
-@max_rank.register(ComposedLinearOperator)
+@rank_range.register(ComposedLinearOperator)
 def _(operator):
-    return min(max_rank(operator.operator1), max_rank(operator.operator2))
+    lo1, hi1 = rank_range(operator.operator1)
+    lo2, hi2 = rank_range(operator.operator2)
+    # Sylvester's rank inequality: `rank(AB) >= rank(A) + rank(B) - k`, where `k` is
+    # the inner dimension.
+    inner_dim = operator.operator1.in_size()
+    return max(0, lo1 + lo2 - inner_dim), min(hi1, hi2)
 
 
 @conj.register(AddLinearOperator)
