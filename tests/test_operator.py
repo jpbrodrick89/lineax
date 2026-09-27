@@ -844,6 +844,42 @@ def test_partial_isometry_composition(getkey):
 
 
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
+def test_partial_isometry_semidefinite_matmul_shortcut(dtype, getkey):
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3), dtype=dtype))
+    matrix = q @ q.conj().T
+    tags = (lx.partial_isometry_tag, lx.positive_semidefinite_tag)
+    projector = lx.MatrixLinearOperator(matrix, tags)
+    # An orthogonal projector is idempotent...
+    assert projector @ projector is projector
+    # ...and a negated one squares to the projector.
+    negated = lx.MatrixLinearOperator(
+        -matrix, (lx.partial_isometry_tag, lx.negative_semidefinite_tag)
+    )
+    squared = negated @ negated
+    assert isinstance(squared, lx.NegLinearOperator) and squared.operator is negated
+    assert lx.is_positive_semidefinite(squared)
+    assert tree_allclose(squared.as_matrix(), matrix)
+    # Also for derived operators, e.g. the identity or a negation.
+    identity = lx.IdentityLinearOperator(jax.ShapeDtypeStruct((5,), dtype))
+    assert identity @ identity is identity
+    neg = -projector
+    assert isinstance(neg @ neg, lx.NegLinearOperator)
+    assert tree_allclose((neg @ neg).as_matrix(), matrix)
+
+    # Not a shortcut: distinct (if equal) objects, a partial isometry that isn't
+    # semidefinite, or a semidefinite operator that isn't a partial isometry.
+    other = lx.MatrixLinearOperator(matrix, tags)
+    assert isinstance(projector @ other, lx.ComposedLinearOperator)
+    reflection = lx.MatrixLinearOperator(
+        jnp.eye(5, dtype=dtype) - 2 * matrix,
+        (lx.partial_isometry_tag, lx.hermitian_tag),
+    )
+    assert isinstance(reflection @ reflection, lx.ComposedLinearOperator)
+    psd = lx.MatrixLinearOperator(matrix, lx.positive_semidefinite_tag)
+    assert isinstance(psd @ psd, lx.ComposedLinearOperator)
+
+
+@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_is_tridiagonal(dtype, getkey):
     diag1 = jr.normal(getkey(), (5,), dtype=dtype)
     diag2 = jr.normal(getkey(), (4,), dtype=dtype)

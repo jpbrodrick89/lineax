@@ -239,6 +239,15 @@ class AbstractLinearOperator(eqx.Module):
 
         if not isinstance(other, AbstractLinearOperator):
             raise ValueError("Can only compose AbstractLinearOperators together.")
+        # A positive semidefinite partial isometry is an orthogonal projector, so it is
+        # idempotent; a negative semidefinite one is a negated projector, and
+        # `(-P) @ (-P) = P`. Only `A @ A` for the very same object is recognised:
+        # comparing distinct operators' arrays would cost as much as the product.
+        if other is self and is_partial_isometry(self):
+            if is_positive_semidefinite(self):
+                return self
+            if is_negative_semidefinite(self):
+                return -self
         return ComposedLinearOperator(self, other)
 
     def __truediv__(self, other) -> "AbstractLinearOperator":
