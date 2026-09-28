@@ -404,6 +404,26 @@ def _check_rank_compat(
             )
 
 
+def _adjoint_is_traceable(operator: AbstractLinearOperator) -> bool:
+    """Whether `operator.H.mv` can be traced at all.
+
+    A Hermitian operator is its own adjoint, but otherwise `A^H` transposes `A`, and
+    not every operator can be transposed -- e.g. a `FunctionLinearOperator` whose
+    function has a `lax.while_loop` with a dynamic trip count is linear, and can be
+    applied, differentiated and materialised (which is all a direct or Krylov solver
+    needs), but not transposed. Checked abstractly, so this costs trace time only.
+    """
+    if is_hermitian(operator):
+        return True
+    try:
+        eqx.filter_eval_shape(
+            lambda op, v: op.H.mv(v), operator, operator.out_structure()
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _partial_isometry_fast_path(
     solver: "AbstractLinearSolver", operator: AbstractLinearOperator
 ) -> bool:
@@ -412,13 +432,18 @@ def _partial_isometry_fast_path(
     modulus, so neither needs a factorisation.
 
     An `IdentityLinearOperator` always takes this path. Any other partial isometry
-    takes it only if the choice of solver was left to `AutoLinearSolver`: an explicitly
-    chosen solver is used as given. Raises if the solver would have rejected the
-    operator statically anyway.
+    takes it only if the choice of solver was left to `AutoLinearSolver` (an explicitly
+    chosen solver is used as given), and only if its conjugate transpose can be
+    traced; otherwise the solver is used after all. Raises if the solver would have
+    rejected the operator statically anyway.
     """
     if isinstance(operator, IdentityLinearOperator):
         return True
-    if isinstance(solver, AutoLinearSolver) and is_partial_isometry(operator):
+    if (
+        isinstance(solver, AutoLinearSolver)
+        and is_partial_isometry(operator)
+        and _adjoint_is_traceable(operator)
+    ):
         # For its static checks only, e.g. `well_posed=True` rejecting a non-square
         # operator.
         solver.select_solver(operator)

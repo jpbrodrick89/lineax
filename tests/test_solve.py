@@ -486,3 +486,34 @@ def test_partial_isometry_fast_path_jvp(getkey):
     ref, t_ref = jax.jvp(reference, (t,), (dt,))
     assert tree_allclose(out, ref)
     assert tree_allclose(t_out, t_ref)
+
+
+@pytest.mark.parametrize("hermitian", (False, True))
+def test_partial_isometry_fast_path_untransposable(hermitian, getkey):
+    # A `lax.while_loop` with a dynamic trip count is linear and can be applied and
+    # materialised, but not transposed. A non-Hermitian operator then falls back to
+    # the solver, where applying `A^H` would fail; a Hermitian one is its own adjoint,
+    # so still takes the fast path.
+    if hermitian:
+        u = jr.normal(getkey(), (4,))
+        u = u / jnp.linalg.norm(u)
+        matrix = jnp.eye(4) - 2 * jnp.outer(u, u)
+        tags = (lx.partial_isometry_tag, lx.symmetric_tag)
+    else:
+        matrix, _ = jnp.linalg.qr(jr.normal(getkey(), (4, 4)))
+        tags = lx.partial_isometry_tag
+
+    def apply(v):
+        def body(carry):
+            i, x = carry
+            return i + 1, matrix @ x
+
+        return jax.lax.while_loop(lambda c: c[0] < jnp.asarray(1), body, (0, v))[1]
+
+    struct = jax.ShapeDtypeStruct((4,), jnp.float64)
+    operator = lx.FunctionLinearOperator(apply, struct, tags)
+    with pytest.raises(ValueError, match="Reverse-mode"):
+        jax.linear_transpose(apply, struct)(jnp.zeros(4))
+    b = jr.normal(getkey(), (4,))
+    assert tree_allclose(lx.linear_solve(operator, b).value, matrix.T @ b)
+    assert tree_allclose(lx.invert(operator).mv(b), matrix.T @ b)
