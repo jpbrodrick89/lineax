@@ -424,7 +424,7 @@ def _adjoint_is_traceable(operator: AbstractLinearOperator) -> bool:
     return True
 
 
-def _partial_isometry_fast_path(
+def partial_isometry_fast_path(
     solver: "AbstractLinearSolver",
     operator: AbstractLinearOperator,
     options: dict[str, Any],
@@ -572,7 +572,7 @@ def linear_solve(
             f"{vector_struct} and an operator with out-structure "
             f"{operator_out_structure}"
         )
-    if _partial_isometry_fast_path(solver, operator, options):
+    if partial_isometry_fast_path(solver, operator, options):
         # The pseudoinverse of a partial isometry is its conjugate transpose, so no
         # factorisation is needed. (For an `IdentityLinearOperator` this is just the
         # same operator with its input and output structures swapped, which matters
@@ -651,7 +651,7 @@ def invert(
     # `invert` factorises here, eagerly, before `linear_solve` is ever called. For a
     # partial isometry, `linear_solve`'s fast path will never use that state, so skip
     # it.
-    if state == sentinel and not _partial_isometry_fast_path(solver, operator, options):
+    if state == sentinel and not partial_isometry_fast_path(solver, operator, options):
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
         stopped_operator = eqx.combine(
             lax.stop_gradient(dynamic_operator), static_operator

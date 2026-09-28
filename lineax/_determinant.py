@@ -33,7 +33,7 @@ from ._operator import (
     TangentLinearOperator,
     trace,
 )
-from ._solve import _partial_isometry_fast_path, AbstractDirectLinearSolver, invert
+from ._solve import AbstractDirectLinearSolver, invert, partial_isometry_fast_path
 from ._solver import AutoLinearSolver
 from ._solver.circulant import Circulant
 from ._solver.normal import Normal
@@ -246,7 +246,7 @@ def slogdet(
         )
     if options is None:
         options = {}
-    partial_isometry = _partial_isometry_fast_path(solver, operator, options)
+    partial_isometry = partial_isometry_fast_path(solver, operator, options)
     # The (pseudo)determinant of a partial isometry has unit modulus, but its sign is
     # cheap only if it is also Hermitian: a reflection has determinant -1 while a
     # unitary operator any unit complex number.
