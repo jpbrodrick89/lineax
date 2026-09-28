@@ -33,6 +33,7 @@ from ._operator import (
     AbstractLinearOperator,
     FunctionLinearOperator,
     IdentityLinearOperator,
+    is_full_rank,
     is_hermitian,
     linearise,
     max_rank,
@@ -333,8 +334,12 @@ def _linear_solve_jvp(primals, tangents):
         vec = (-(t_operator.mv(solution) ** ω)).ω
         vecs.append(vec)
         rows, columns = operator.out_size(), operator.in_size()
-        assume_independent_rows = solver.assume_full_rank() and rows <= columns
-        assume_independent_columns = solver.assume_full_rank() and columns <= rows
+        # Either the solver assumes full rank, or the operator is declared to be, in
+        # which case the pseudoinverse terms below are exactly zero (and a solver that
+        # handles rank deficiency checks that claim in `init`).
+        full_rank = solver.assume_full_rank() or is_full_rank(operator)
+        assume_independent_rows = full_rank and rows <= columns
+        assume_independent_columns = full_rank and columns <= rows
         if not assume_independent_rows or not assume_independent_columns:
             operator_conj_transpose = operator.H
             t_operator_conj_transpose = t_operator.H

@@ -14,6 +14,7 @@
 
 import equinox as eqx
 import jax
+import jax.extend.core as jax_core
 import jax.numpy as jnp
 import lineax as lx
 import pytest
@@ -689,6 +690,47 @@ def test_full_rank_svd_jvp_and_gram(getkey):
     got = jax.jvp(lambda m: solve(m, lx.MinRankTag(4)), (matrix,), (t_matrix,))
     assert jnp.allclose(expected[0], got[0])
     assert jnp.allclose(expected[1], got[1])
+
+
+def _count_solves(jaxpr):
+    count = 0
+    for eqn in jaxpr.eqns:
+        count += eqn.primitive.name == "linear_solve"
+        for param in eqn.params.values():
+            for sub in param if isinstance(param, (list, tuple)) else (param,):
+                if isinstance(sub, jax_core.ClosedJaxpr):
+                    count += _count_solves(sub.jaxpr)
+                elif isinstance(sub, jax_core.Jaxpr):
+                    count += _count_solves(sub)
+    return count
+
+
+@pytest.mark.parametrize("solver", (lx.SVD(), lx.HEVD()))
+def test_full_rank_tag_skips_pseudoinverse_jvp_terms(solver, getkey):
+    # A rank-deficient-capable solver on an operator declared full rank: the
+    # pseudoinverse terms of the JVP are exactly zero, so their solves are skipped.
+    matrix = jax.random.normal(getkey(), (5, 5))
+    matrix = matrix @ matrix.T + jnp.eye(5)
+    t_matrix = jax.random.normal(getkey(), (5, 5))
+    t_matrix = t_matrix + t_matrix.T
+    vector = jax.random.normal(getkey(), (5,))
+
+    def jvp(tags):
+        def solve(m):
+            op = lx.MatrixLinearOperator(m, (lx.hermitian_tag, *tags))
+            return lx.linear_solve(op, vector, solver).value
+
+        return lambda m, t: jax.jvp(solve, (m,), (t,))
+
+    plain, tagged = jvp(()), jvp((lx.RankTag(5),))
+    expected, got = plain(matrix, t_matrix), tagged(matrix, t_matrix)
+    assert jnp.allclose(expected[0], got[0])
+    assert jnp.allclose(expected[1], got[1])
+    num_plain = _count_solves(jax.make_jaxpr(plain)(matrix, t_matrix).jaxpr)
+    num_tagged = _count_solves(jax.make_jaxpr(tagged)(matrix, t_matrix).jaxpr)
+    # Primal and `A⁺(-A'x)` only, against the primal, both adjoint terms and the `A⁺`.
+    assert num_tagged == 2
+    assert num_plain > num_tagged
 
 
 # ---------------------------------------------------------------------------
