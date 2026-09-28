@@ -33,8 +33,8 @@ from ._operator import (
     TangentLinearOperator,
 )
 from ._solve import (
-    _check_rank_compat,
     AbstractLinearSolver,
+    check_rank_compat,
     linear_solve,
     partial_isometry_fast_path,
 )
@@ -149,7 +149,7 @@ def dual_hermitian_form(
     if options is None:
         options = {}
     vector = jtu.tree_map(inexact_asarray, vector)
-    _check_rank_compat(solver, operator)
+    check_rank_compat(solver, operator)
     # For a partial isometry `linear_solve` never uses the state, so don't factorise.
     if state is sentinel and not partial_isometry_fast_path(solver, operator, options):
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)

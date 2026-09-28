@@ -388,9 +388,7 @@ eqxi.register_impl_finalisation(linear_solve_p)
 #
 
 
-def _check_rank_compat(
-    solver: "AbstractLinearSolver", operator: AbstractLinearOperator
-):
+def check_rank_compat(solver: "AbstractLinearSolver", operator: AbstractLinearOperator):
     if solver.assume_full_rank():
         dim_bound = min(operator.in_size(), operator.out_size())
         if max_rank(operator) < dim_bound:
@@ -445,7 +443,7 @@ def partial_isometry_fast_path(
         # tags the solver requires -- are made in `init`, so trace it abstractly for
         # them. This costs trace time only.
         eqx.filter_eval_shape(solver.init, operator, options)
-        _check_rank_compat(solver, operator)
+        check_rank_compat(solver, operator)
         return True
     return False
 
@@ -585,7 +583,7 @@ def linear_solve(
             stats={},
         )
     if state == sentinel:
-        _check_rank_compat(solver, operator)
+        check_rank_compat(solver, operator)
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
         stopped_operator = eqx.combine(
             lax.stop_gradient(dynamic_operator), static_operator
@@ -647,7 +645,7 @@ def invert(
     if options is None:
         options = {}
 
-    _check_rank_compat(solver, operator)
+    check_rank_compat(solver, operator)
     # `invert` factorises here, eagerly, before `linear_solve` is ever called. For a
     # partial isometry, `linear_solve`'s fast path will never use that state, so skip
     # it.
