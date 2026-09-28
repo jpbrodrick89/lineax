@@ -425,28 +425,26 @@ def _adjoint_is_traceable(operator: AbstractLinearOperator) -> bool:
 
 
 def _partial_isometry_fast_path(
-    solver: "AbstractLinearSolver", operator: AbstractLinearOperator
+    solver: "AbstractLinearSolver",
+    operator: AbstractLinearOperator,
+    options: dict[str, Any],
 ) -> bool:
     """Whether to bypass `solver` for `operator` as a partial isometry: its
     pseudoinverse is its conjugate transpose, and its (pseudo)determinant has unit
-    modulus, so neither needs a factorisation.
+    modulus, so neither needs a factorisation. Whichever solver was chosen, it would
+    compute the same pseudoinverse solution.
 
-    An `IdentityLinearOperator` always takes this path. Any other partial isometry
-    takes it only if the choice of solver was left to `AutoLinearSolver` (an explicitly
-    chosen solver is used as given), and only if its conjugate transpose can be
-    traced; otherwise the solver is used after all. Raises if the solver would have
-    rejected the operator statically anyway.
+    A partial isometry whose conjugate transpose cannot be traced uses the solver
+    after all. Raises if the solver would have rejected the operator statically
+    anyway.
     """
     if isinstance(operator, IdentityLinearOperator):
         return True
-    if (
-        isinstance(solver, AutoLinearSolver)
-        and is_partial_isometry(operator)
-        and _adjoint_is_traceable(operator)
-    ):
-        # For its static checks only, e.g. `well_posed=True` rejecting a non-square
-        # operator.
-        solver.select_solver(operator)
+    if is_partial_isometry(operator) and _adjoint_is_traceable(operator):
+        # The solver's own checks -- e.g. that the operator is square, or carries the
+        # tags the solver requires -- are made in `init`, so trace it abstractly for
+        # them. This costs trace time only.
+        eqx.filter_eval_shape(solver.init, operator, options)
         _check_rank_compat(solver, operator)
         return True
     return False
@@ -574,7 +572,7 @@ def linear_solve(
             f"{vector_struct} and an operator with out-structure "
             f"{operator_out_structure}"
         )
-    if _partial_isometry_fast_path(solver, operator):
+    if _partial_isometry_fast_path(solver, operator, options):
         # The pseudoinverse of a partial isometry is its conjugate transpose, so no
         # factorisation is needed. (For an `IdentityLinearOperator` this is just the
         # same operator with its input and output structures swapped, which matters
@@ -655,7 +653,7 @@ def invert(
     # `invert` factorises here, eagerly, before `linear_solve` is ever called. For a
     # partial isometry, `linear_solve`'s fast path will never use that state, so skip
     # it.
-    if state == sentinel and not _partial_isometry_fast_path(solver, operator):
+    if state == sentinel and not _partial_isometry_fast_path(solver, operator, options):
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
         stopped_operator = eqx.combine(
             lax.stop_gradient(dynamic_operator), static_operator

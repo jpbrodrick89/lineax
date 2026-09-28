@@ -436,24 +436,49 @@ def test_partial_isometry_fast_path(shape, well_posed, dtype, getkey):
     assert tree_allclose(lx.invert(operator, solver).mv(b), expected)
 
 
-def test_partial_isometry_fast_path_only_for_auto(getkey):
+@pytest.mark.parametrize(
+    "solver",
+    [
+        lx.AutoLinearSolver(well_posed=True),
+        lx.AutoLinearSolver(well_posed=False),
+        lx.LU(),
+        lx.QR(),
+        lx.SVD(),
+        lx.GMRES(rtol=1e-6, atol=1e-6),
+        lx.BiCGStab(rtol=1e-6, atol=1e-6),
+    ],
+)
+def test_partial_isometry_fast_path_any_solver(solver, getkey):
     # The tag is taken on trust, so tagging a matrix that is *not* a partial isometry
-    # exposes which path ran: `AutoLinearSolver` applies `A^H`, while an explicitly
-    # chosen solver is used as given.
+    # exposes which path ran: every solver applies `A^H` -- exactly, even an iterative
+    # one with a loose tolerance.
     matrix = jr.normal(getkey(), (4, 4))
     operator = lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag)
     b = jr.normal(getkey(), (4,))
-    auto = lx.linear_solve(operator, b).value
-    assert tree_allclose(auto, matrix.T @ b)
-    lu = lx.linear_solve(operator, b, lx.LU()).value
-    assert tree_allclose(lu, jnp.linalg.solve(matrix, b))
+    # (Far tighter than the iterative solvers' tolerance.)
+    out = lx.linear_solve(operator, b, solver).value
+    assert tree_allclose(out, matrix.T @ b, rtol=1e-12, atol=1e-12)
 
 
 def test_partial_isometry_fast_path_keeps_static_checks(getkey):
+    # A solver still rejects what it would have rejected anyway.
     q, _ = jnp.linalg.qr(jr.normal(getkey(), (5, 3)))
     tall = lx.MatrixLinearOperator(q, lx.partial_isometry_tag)
     with pytest.raises(ValueError, match="non-square"):
         lx.linear_solve(tall, jnp.zeros(5))
+    with pytest.raises(ValueError, match="square"):
+        lx.linear_solve(tall, jnp.zeros(5), lx.LU())
+    for solver in (lx.QR(), lx.SVD(), lx.AutoLinearSolver(well_posed=False)):
+        out = lx.linear_solve(tall, q[:, 0], solver)
+        assert tree_allclose(out.value, jnp.eye(3)[0])
+
+    square, _ = jnp.linalg.qr(jr.normal(getkey(), (4, 4)))
+    orthogonal = lx.MatrixLinearOperator(square, lx.partial_isometry_tag)
+    with pytest.raises(ValueError, match="definite"):
+        lx.linear_solve(orthogonal, jnp.zeros(4), lx.Cholesky())
+    with pytest.raises(ValueError, match="triangular"):
+        lx.linear_solve(orthogonal, jnp.zeros(4), lx.Triangular())
+
     projector = lx.MatrixLinearOperator(
         q @ q.T, (lx.partial_isometry_tag, lx.RankTag(3))
     )

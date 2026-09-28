@@ -231,11 +231,11 @@ def slogdet(
     recover it cheaply (e.g. [`lineax.SVD`][] on a full-rank square matrix, or
     [`lineax.Normal`][]).
 
-    With [`lineax.AutoLinearSolver`][], an operator tagged
-    [`lineax.partial_isometry_tag`][] has `logabsdet` exactly `0`. The `sign` still
-    comes from the solver it selects, unless the operator is also Hermitian (e.g. an
-    orthogonal projector or a reflection), when it is read off traces instead. So if
-    only `logabsdet` is used under JIT, no factorisation is computed at all.
+    An operator tagged [`lineax.partial_isometry_tag`][] has `logabsdet` exactly `0`.
+    The `sign` still comes from the solver, unless the operator is also Hermitian
+    (e.g. an orthogonal projector or a reflection), when it is read off traces
+    instead. So if only `logabsdet` is used under JIT, no factorisation is computed at
+    all.
     """
     if not isinstance(solver, AbstractDirectLinearSolver | Normal):
         raise TypeError(
@@ -246,7 +246,7 @@ def slogdet(
         )
     if options is None:
         options = {}
-    partial_isometry = _partial_isometry_fast_path(solver, operator)
+    partial_isometry = _partial_isometry_fast_path(solver, operator, options)
     # Every nonzero singular value of a partial isometry is one, so its
     # (pseudo)determinant has unit modulus. Its sign is cheap only if it is also
     # Hermitian (the identity included): a reflection has determinant -1, and a

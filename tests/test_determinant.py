@@ -1583,14 +1583,22 @@ def test_slogdet_partial_isometry_full_rank_solver_rejects_rank_deficient(getkey
         lx.slogdet(projector)
 
 
-def test_slogdet_partial_isometry_explicit_solver_used_as_given(getkey):
-    # As in `linear_solve`, the fast path is `AutoLinearSolver`'s only: tagging a
-    # non-isometry exposes that an explicit solver still computes `logabsdet` itself.
+def test_slogdet_partial_isometry_any_solver(getkey):
+    # As in `linear_solve`, the fast path applies whichever solver is chosen: tagging
+    # a non-isometry exposes that `logabsdet` is not computed, even by `LU`.
     matrix = jr.normal(getkey(), (4, 4))
     operator = lx.MatrixLinearOperator(matrix, lx.partial_isometry_tag)
     assert lx.slogdet(operator)[1] == 0
-    _, lad = lx.slogdet(operator, lx.LU())
-    assert jnp.allclose(lad, jnp.linalg.slogdet(matrix)[1])
+    assert lx.slogdet(operator, lx.LU())[1] == 0
+    # `SVD` cannot recover a sign by itself, but a Hermitian partial isometry's sign
+    # comes from its traces instead.
+    u = jr.normal(getkey(), (4,))
+    u = u / jnp.linalg.norm(u)
+    reflection = lx.MatrixLinearOperator(
+        jnp.eye(4) - 2 * jnp.outer(u, u), (lx.partial_isometry_tag, lx.symmetric_tag)
+    )
+    assert lx.slogdet(reflection, lx.SVD()) == (-1, 0)
+    assert lx.slogdet(reflection, lx.Normal(lx.Cholesky())) == (-1, 0)
 
 
 def test_slogdet_partial_isometry_jvp(getkey):
