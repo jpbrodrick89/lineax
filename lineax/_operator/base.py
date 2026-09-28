@@ -801,10 +801,10 @@ def rank_range(operator: AbstractLinearOperator) -> tuple[int, int]:
     # dispatch still produce a valid result.
     dim_bound = min(operator.out_size(), operator.in_size())
     tags = getattr(operator, "tags", ())
-    return _apply_rank_tags(tags, 0, dim_bound)
+    return apply_rank_tags(tags, 0, dim_bound)
 
 
-def _apply_rank_tags(tags, lo: int, hi: int) -> tuple[int, int]:
+def apply_rank_tags(tags, lo: int, hi: int) -> tuple[int, int]:
     """Narrows the range `[lo, hi]` by any `RankRangeTag`s in `tags`."""
     for tag in tags:
         if isinstance(tag, RankRangeTag):

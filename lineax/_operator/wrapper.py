@@ -41,8 +41,8 @@ from .._tags import (
     upper_triangular_tag,
 )
 from .base import (
-    _apply_rank_tags,
     AbstractLinearOperator,
+    apply_rank_tags,
     as_frozenset,
     conj,
     diagonal,
@@ -639,7 +639,7 @@ def _(operator):
 
 @rank_range.register(TaggedLinearOperator)
 def _(operator):
-    return _apply_rank_tags(operator.tags, *rank_range(operator.operator))
+    return apply_rank_tags(operator.tags, *rank_range(operator.operator))
 
 
 # conj
