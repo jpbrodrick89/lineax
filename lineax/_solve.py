@@ -577,9 +577,7 @@ def linear_solve(
         # factorisation is needed. (For an `IdentityLinearOperator` this is just the
         # same operator with its input and output structures swapped, which matters
         # when those are laid out differently: the solution must have the operator's
-        # in-structure, not its out-structure.) Differentiating through `A^H` directly
-        # is exact for tangents that keep `A` a partial isometry, i.e. that respect the
-        # tag -- as for any other tag.
+        # in-structure, not its out-structure.)
         return Solution(
             value=operator.H.mv(vector),
             result=RESULTS.successful,

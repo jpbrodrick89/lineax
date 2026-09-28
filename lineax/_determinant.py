@@ -247,14 +247,12 @@ def slogdet(
     if options is None:
         options = {}
     partial_isometry = _partial_isometry_fast_path(solver, operator, options)
-    # Every nonzero singular value of a partial isometry is one, so its
-    # (pseudo)determinant has unit modulus. Its sign is cheap only if it is also
-    # Hermitian (the identity included): a reflection has determinant -1, and a
-    # unitary operator any unit complex number. Deferring to the solver for those costs
-    # nothing extra when only `logabsdet` is used, but would for a Hermitian one:
-    # `HEVD` needs every eigenvalue for the sign. The identity is checked separately
-    # because it is only tagged Hermitian (and positive semidefinite) when its input
-    # and output structures match, but its determinant is `1` either way.
+    # The (pseudo)determinant of a partial isometry has unit modulus, but its sign is
+    # cheap only if it is also Hermitian: a reflection has determinant -1 while a
+    # unitary operator any unit complex number.
+    #
+    # The identity is only considered Hermitian (and positive semidefinite) when its
+    # input and output structures match, but its determinant is `1` either way.
     if partial_isometry and (
         isinstance(operator, IdentityLinearOperator) or is_hermitian(operator)
     ):
@@ -278,10 +276,9 @@ def slogdet(
         state = eqxi.nondifferentiable(state, name="`lx.slogdet` state")
     sign, logabsdet = _slogdet(operator, solver, options, state)
     if partial_isometry:
-        # Otherwise the sign still takes the solver, but `logabsdet` is exactly zero.
         # Returning a constant here (rather than the solver's own, numerically
         # near-zero, value) means that under JIT, a caller that uses only `logabsdet`
-        # leaves the factorisation dead, and XLA eliminates it.
+        # leaves the factorisation dead, and XLA eliminates it through DCE.
         logabsdet = jnp.zeros_like(logabsdet)
     return sign, logabsdet
 

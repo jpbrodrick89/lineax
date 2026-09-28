@@ -144,9 +144,9 @@ For example, the default solver for [`lineax.linear_solve`][] uses this to dispa
 
 ::: lineax.partial_isometry_tag
 
-Marks that an operator is a **partial isometry**: every nonzero singular value is one, or equivalently $A A^\mathrm{H} A = A$. This includes orthogonal/unitary matrices, matrices with orthonormal columns or rows, orthogonal projectors, and permutation and selection matrices.
+Marks that an operator is a **partial isometry** (i.e. every singular value is zero or one, or equivalently, an operator's adjoint is its pseudoinverse: $A A^\mathrm{H} A = A$). This includes orthogonal/unitary matrices, matrices with orthonormal columns or rows, orthogonal projectors, and permutation and selection matrices.
 
-For example, [`lineax.linear_solve`][] uses this to skip factorising the operator altogether, since the pseudoinverse of a partial isometry is its conjugate transpose, and [`lineax.slogdet`][] uses it to return `logabsdet = 0` without factorising. The tag is preserved under transposition and (pseudo)inversion, by negation and by scaling by a static unit-modulus scalar, and through `A @ B` when `A` is known to be injective or `B` surjective (see [`lineax.rank_range`][]).
+For example, [`lineax.linear_solve`][] uses this to skip factorising the operator altogether, since the pseudoinverse of a partial isometry is its conjugate transpose, and [`lineax.slogdet`][] uses it to return `logabsdet = 0` without factorising.
 
 ---
 
