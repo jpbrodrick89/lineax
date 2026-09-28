@@ -490,7 +490,7 @@ def _(operator):
 def _scalar_abs(scalar) -> float | None:
     """Returns the absolute value of a scalar, or `None` for JAX tracers."""
     if isinstance(scalar, (int, float, complex, np.ndarray, np.generic)):
-        return abs(complex(scalar))
+        return float(np.abs(scalar))
     return None
 
 

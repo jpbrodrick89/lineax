@@ -64,25 +64,32 @@ def _det_sign_error_msg(
 
 def _hermitian_partial_isometry_slogdet(
     operator: AbstractLinearOperator,
+    solver: "AbstractDirectLinearSolver | Normal",
 ) -> tuple[Array, Array]:
     """`slogdet` of a Hermitian partial isometry, without a factorisation.
 
     Its eigenvalues are all in `{-1, 0, 1}`, so `logabsdet` is zero, and the sign
     `HEVD` would return is `(-1)**q`, for `q` the number of `-1`s. With `p` the number
     of `1`s, `trace(A) = p - q` and `rank = p + q`, so `q = (rank - trace(A)) / 2`.
-    The rank is taken from a static `rank_range` if it is exact; otherwise from
-    `|trace(A)|` if the operator is semidefinite (as then `p` or `q` is zero), and
-    failing that from `trace(A @ A) = ||A||_F**2`. Both traces only need diagonals,
-    so structured operators keep their fast paths, and even a dense one costs
-    `O(n**2)` rather than an `O(n**3)` eigendecomposition.
+    The rank is known statically if the solver assumes full rank, or if `rank_range`
+    is exact; otherwise it is `|trace(A)|` if the operator is semidefinite (as then `p`
+    or `q` is zero), and failing that `trace(A @ A) = ||A||_F**2`. Both traces only
+    need diagonals, so structured operators keep their fast paths, and even a dense one
+    costs `O(n**2)` rather than an `O(n**3)` eigendecomposition.
     """
     dtype = in_dtype(operator)
     logabsdet = jnp.zeros((), dtype=jnp.finfo(dtype).dtype)
+    # (See `slogdet` for why the identity is checked separately.)
     if isinstance(operator, IdentityLinearOperator) or is_positive_semidefinite(
         operator
     ):
         return jnp.ones((), dtype=dtype), logabsdet
-    lo, hi = rank_range(operator)
+    if solver.assume_full_rank():
+        # As `Cholesky` does for a semidefinite operator, take the operator to be
+        # nonsingular, as the solver does. Then every eigenvalue is `1` or `-1`.
+        lo = hi = operator.in_size()
+    else:
+        lo, hi = rank_range(operator)
     if is_negative_semidefinite(operator) and lo == hi:
         return jnp.asarray((-1) ** lo, dtype=dtype), logabsdet
     t = jnp.real(trace(operator))
@@ -245,11 +252,13 @@ def slogdet(
     # Hermitian (the identity included): a reflection has determinant -1, and a
     # unitary operator any unit complex number. Deferring to the solver for those costs
     # nothing extra when only `logabsdet` is used, but would for a Hermitian one:
-    # `HEVD` needs every eigenvalue for the sign.
+    # `HEVD` needs every eigenvalue for the sign. The identity is checked separately
+    # because it is only tagged Hermitian (and positive semidefinite) when its input
+    # and output structures match, but its determinant is `1` either way.
     if partial_isometry and (
         isinstance(operator, IdentityLinearOperator) or is_hermitian(operator)
     ):
-        return _hermitian_partial_isometry_slogdet(operator)
+        return _hermitian_partial_isometry_slogdet(operator, solver)
     # For the solvers whose own `slogdet` we differentiate, the state is the thing
     # being differentiated, so it has to reach `_slogdet` with its tangent intact --
     # both the `stop_gradient` and the `nondifferentiable` guard below would sever it.

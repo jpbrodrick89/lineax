@@ -833,6 +833,17 @@ def test_partial_isometry_composition(getkey):
     assert lx.is_partial_isometry(isometry @ projector)  # injective first
     assert lx.is_partial_isometry(projector @ isometry.T)  # surjective second
     assert not lx.is_partial_isometry(projector @ projector)  # rank unknown
+    # Full rank is not enough for the first factor: it has to be full *column* rank.
+    # A wide co-isometry is full rank, yet composed with a projector it contracts.
+    co_isometry = lx.MatrixLinearOperator(
+        jnp.array([[1.0, 1.0]]) / jnp.sqrt(2.0), (tag, lx.RankTag(1))
+    )
+    assert lx.is_full_rank(co_isometry)
+    first_axis = lx.MatrixLinearOperator(jnp.diag(jnp.array([1.0, 0.0])), tag)
+    assert not lx.is_partial_isometry(co_isometry @ first_axis)
+    assert jnp.allclose(
+        (co_isometry @ first_axis).as_matrix(), jnp.sqrt(0.5) * u[None, :]
+    )
     for op in (isometry @ projector, projector @ isometry.T):
         s = jnp.linalg.svd(op.as_matrix(), compute_uv=False)
         assert jnp.allclose(s[s > 1e-8], 1.0)

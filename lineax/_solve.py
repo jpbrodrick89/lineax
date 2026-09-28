@@ -418,13 +418,13 @@ def _partial_isometry_fast_path(
     """
     if isinstance(operator, IdentityLinearOperator):
         return True
-    if not (isinstance(solver, AutoLinearSolver) and is_partial_isometry(operator)):
-        return False
-    # For its static checks only, e.g. `well_posed=True` rejecting a non-square
-    # operator.
-    solver.select_solver(operator)
-    _check_rank_compat(solver, operator)
-    return True
+    if isinstance(solver, AutoLinearSolver) and is_partial_isometry(operator):
+        # For its static checks only, e.g. `well_posed=True` rejecting a non-square
+        # operator.
+        solver.select_solver(operator)
+        _check_rank_compat(solver, operator)
+        return True
+    return False
 
 
 @eqx.filter_jit
@@ -627,8 +627,9 @@ def invert(
         options = {}
 
     _check_rank_compat(solver, operator)
-    # A partial isometry is solved by `linear_solve`'s fast path, which never touches
-    # the state, so don't factorise it.
+    # `invert` factorises here, eagerly, before `linear_solve` is ever called. For a
+    # partial isometry, `linear_solve`'s fast path will never use that state, so skip
+    # it.
     if state == sentinel and not _partial_isometry_fast_path(solver, operator):
         dynamic_operator, static_operator = eqx.partition(operator, eqx.is_array)
         stopped_operator = eqx.combine(

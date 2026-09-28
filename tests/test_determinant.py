@@ -1507,6 +1507,53 @@ def test_slogdet_partial_isometry_hermitian_structured(diag, sign):
     )
 
 
+@pytest.mark.parametrize("q", (0, 1, 2, 5))
+def test_slogdet_partial_isometry_hermitian_full_rank_solver(q, getkey):
+    # A full-rank solver takes the operator to be nonsingular, so its rank is its
+    # size and `trace(A @ A)` is never formed: only `trace(A)` is needed.
+    n = 5
+    v, _ = jnp.linalg.qr(jr.normal(getkey(), (n, n)))
+    eigenvalues = jnp.array([1.0] * (n - q) + [-1.0] * q)
+    matrix = (v * eigenvalues[None, :]) @ v.T
+    tags = (lx.partial_isometry_tag, lx.symmetric_tag)
+
+    def slogdet(m):
+        return lx.slogdet(lx.MatrixLinearOperator(m, tags))
+
+    assert slogdet(matrix) == ((-1) ** q, 0)
+    assert "dot_general" not in str(jax.make_jaxpr(slogdet)(matrix))
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        (lx.positive_semidefinite_tag,),
+        (lx.negative_semidefinite_tag, lx.RankTag(3)),
+        (lx.negative_semidefinite_tag,),
+        (lx.hermitian_tag,),
+    ],
+)
+def test_slogdet_partial_isometry_vmap(tags, getkey):
+    # Some of these return constants that don't depend on the (batched) operator at
+    # all; `vmap` must still broadcast them to the batch. Each draw is a (negated)
+    # rank-3 projector, so the negated sign is `(-1)**3`.
+    q, _ = jnp.linalg.qr(jr.normal(getkey(), (4, 6, 3)))
+    matrices = jnp.einsum("bij,bkj->bik", q, q)
+    if lx.negative_semidefinite_tag in tags:
+        matrices = -matrices
+    solver = lx.AutoLinearSolver(well_posed=False)
+    tags = (lx.partial_isometry_tag,) + tags
+
+    def slogdet(m):
+        return lx.slogdet(lx.MatrixLinearOperator(m, tags), solver)
+
+    for vmap in (jax.vmap, eqx.filter_vmap):
+        sign, lad = vmap(slogdet)(matrices)
+        assert sign.shape == lad.shape == (4,)
+        expected = -1 if lx.negative_semidefinite_tag in tags else 1
+        assert jnp.all(sign == expected) and jnp.all(lad == 0)
+
+
 def test_slogdet_partial_isometry_semidefinite_traced_sign(getkey):
     # Scaling by a traced unit scalar leaves only `semidefinite_tag`; the sign is then
     # resolved at runtime, per batch element.

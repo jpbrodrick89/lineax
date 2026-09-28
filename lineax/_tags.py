@@ -289,7 +289,6 @@ for tag in (
     semidefinite_tag,
     tridiagonal_tag,
     circulant_tag,
-    # `A` and `A^T` share their singular values, so both or neither are 0/1.
     partial_isometry_tag,
 ):
 
@@ -355,7 +354,6 @@ for tag in (
     negative_semidefinite_tag,
     semidefinite_tag,
     circulant_tag,
-    # The pseudoinverse of a partial isometry is its conjugate transpose.
     partial_isometry_tag,
 ):
 
