@@ -19,6 +19,7 @@ from ._determinant import (
     determinant as determinant,
     slogdet as slogdet,
 )
+from ._hermitian_form import dual_hermitian_form as dual_hermitian_form
 from ._operator import (
     AbstractLinearOperator as AbstractLinearOperator,
     AddLinearOperator as AddLinearOperator,
