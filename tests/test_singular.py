@@ -53,8 +53,8 @@ def test_small_singular(make_operator, solver, tags, ops, getkey, dtype):
 
 # `construct_singular_matrix` builds singular circulants by zeroing the smallest FFT
 # mode, so the parametrised singular tests above cover `Circulant` too. This test
-# predates that and is kept for its explicit check of the `_gram_partner` JVP path,
-# with a hand-picked (rather than smallest) zeroed eigenvalue.
+# predates that and is kept for its explicit check of the pseudoinverse JVP, with a
+# hand-picked (rather than smallest) zeroed eigenvalue.
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
 def test_circulant_singular_jvp(getkey, dtype):
     size = 6
@@ -88,8 +88,8 @@ def test_circulant_singular_jvp(getkey, dtype):
     x, t_x = eqx.filter_jvp(circulant, (column, vector), (t_column, t_vector))
     true_x, true_t_x = eqx.filter_jvp(dense, (column, vector), (t_column, t_vector))
     assert tree_allclose(x, true_x, atol=tol, rtol=tol)
-    # The JVP takes the `_gram_partner` path, as `Circulant.assume_full_rank()` is
-    # `False`: the gram matrix `AᴴA` is itself circulant, with eigenvalues `|λ|²`.
+    # `Circulant.assume_full_rank()` is `False`, so the JVP includes the pseudoinverse
+    # terms.
     assert tree_allclose(t_x, true_t_x, atol=tol, rtol=tol)
 
     # `AutoLinearSolver(well_posed=False)` dispatches to the same pseudo-solve.

@@ -12,70 +12,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the private gram-partner optimisation used in `_linear_solve_jvp`.
+"""Tests for the gram solve used by `_linear_solve_jvp`.
 
-Every non-well-posed solver whose factorisation cheaply yields `(AᴴA)⁺` has a
-"gram partner": a `(gram_solver, gram_state)` pair, reusing the existing
-factorisation, such that solving `AᴴA` with it computes `(AᴴA)⁺`. The JVP uses
-this to collapse a nested pair of adjoint solves into a single gram solve.
-
-These tests assert the defining property directly -- that the partner really does
-compute `(AᴴA)⁺` -- rather than leaving it to be checked implicitly (and only
-partially) by the JVP suites. In particular the JVP suites exercise the QR partner
-not at all: QR is registered full-rank/square-only, whereas its partner is reached
-only for *tall* operators. The `_has_gram_partner` gate below is keyed on the same
-predicate the JVP uses, so any newly added solver that opts into the fast path is
-covered here automatically -- no separate registration to remember.
+For a tall operator, the JVP of a least-squares solve has a term `(AᴴA)⁺ w`. A tall QR
+or `Normal` computes it with a single solve against the gram matrix `AᴴA`, reusing its
+factorisation, rather than the generic adjoint solve. The standard JVP suites are
+square-only, so they never reach it: these tests check the tall case directly, against
+the pseudoinverse.
 """
 
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import lineax as lx
 import pytest
-from lineax._solve import _gram_partner, _has_gram_partner
 
-from .helpers import (
-    construct_matrix,
-    make_matrix_operator,
-    solvers_tags_pseudoinverse,
-    tree_allclose,
-)
+from .helpers import tree_allclose
 
 
-def _assert_gram_partner(operator, solver, getkey, dtype):
-    """If `solver` has a gram partner for `operator`, check it computes `(AᴴA)⁺`."""
-    state = solver.init(operator, options={})
-    if not _has_gram_partner(solver, state):
-        return False
-    gram_operator = lx.TaggedLinearOperator(
-        operator.H @ operator, lx.positive_semidefinite_tag
-    )
-    gram_solver, gram_state = _gram_partner(solver, gram_operator, state)
-    v = jr.normal(getkey(), (operator.in_size(),), dtype=dtype)
-    got = lx.linear_solve(gram_operator, v, gram_solver, state=gram_state).value
-    matrix = operator.as_matrix()
-    expected = jnp.linalg.pinv(matrix.conj().T @ matrix) @ v  # pyright: ignore
-    assert tree_allclose(got, expected, atol=1e-4, rtol=1e-4)
-    return True
+_tall_solvers = (lx.QR(), lx.Normal(lx.Cholesky()), lx.Normal(lx.SVD()))
 
 
-@pytest.mark.parametrize("solver, tags, pseudoinverse", solvers_tags_pseudoinverse)
+def _solve(solver, vector):
+    def fn(matrix):
+        operator = lx.MatrixLinearOperator(matrix)
+        return lx.linear_solve(operator, vector, solver).value
+
+    return fn
+
+
+def _reference(vector):
+    return lambda matrix: jnp.linalg.pinv(matrix) @ vector
+
+
+@pytest.mark.parametrize("solver", _tall_solvers)
 @pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
-def test_gram_partner_square(solver, tags, pseudoinverse, getkey, dtype):
-    del pseudoinverse
-    (matrix,) = construct_matrix(getkey, solver, tags, dtype=dtype)
-    operator = make_matrix_operator(getkey, matrix, tags)
-    # Solvers without a gram partner (Triangular, LU, Cholesky, CG, ...) are skipped
-    # via the `_has_gram_partner` gate inside the helper.
-    _assert_gram_partner(operator, solver, getkey, dtype)
+def test_gram_solve_jvp(solver, dtype, getkey):
+    matrix = jr.normal(getkey(), (6, 3), dtype=dtype)
+    vector = jr.normal(getkey(), (6,), dtype=dtype)
+    t_matrix = jr.normal(getkey(), (6, 3), dtype=dtype)
+    _, t_out = jax.jvp(_solve(solver, vector), (matrix,), (t_matrix,))
+    _, t_expected = jax.jvp(_reference(vector), (matrix,), (t_matrix,))
+    assert tree_allclose(t_out, t_expected, rtol=1e-6, atol=1e-8)
 
 
-@pytest.mark.parametrize("solver", (lx.QR(), lx.SVD()))
-@pytest.mark.parametrize("dtype", (jnp.float64, jnp.complex128))
-def test_gram_partner_tall(solver, getkey, dtype):
-    # Tall is the shape for which the QR partner is actually reached in the JVP, and
-    # which the square-only standard suites never test.
-    matrix = jr.normal(getkey(), (5, 3), dtype=dtype)
-    operator = lx.MatrixLinearOperator(matrix)
-    used = _assert_gram_partner(operator, solver, getkey, dtype)
-    assert used  # both QR and SVD must expose a gram partner when tall
+@pytest.mark.parametrize("solver", _tall_solvers)
+def test_gram_solve_second_order(solver, getkey):
+    matrix = jr.normal(getkey(), (6, 3))
+    vector = jr.normal(getkey(), (6,))
+    t_matrix = jr.normal(getkey(), (6, 3))
+
+    def second(fn):
+        jvp = lambda m: jax.jvp(fn, (m,), (t_matrix,))[1]
+        return jax.jvp(jvp, (matrix,), (t_matrix,))[1]
+
+    expected = second(_reference(vector))
+    assert tree_allclose(second(_solve(solver, vector)), expected, rtol=1e-6)
+
+
+def test_gram_solve_grad_of_grad(getkey):
+    # The QR gram solve's `Cholesky` state once held `is_nsd` as a scalar array. Under
+    # grad-of-grad, that is inlined into the transposed jaxpr as a literal, so it
+    # reached the `linear_solve` transpose rule as a Python bool, and a different
+    # number of dynamic inputs than were bound.
+    matrix = jr.normal(getkey(), (6, 3))
+    vector = jr.normal(getkey(), (6,))
+    weights = jr.normal(getkey(), (6, 3))
+
+    def grad_of_grad(fn):
+        loss = lambda m: jnp.sum(fn(m) ** 3)
+        return jax.grad(lambda m: jnp.sum(jax.grad(loss)(m) * weights))(matrix)
+
+    expected = grad_of_grad(_reference(vector))
+    assert tree_allclose(grad_of_grad(_solve(lx.QR(), vector)), expected, rtol=1e-6)

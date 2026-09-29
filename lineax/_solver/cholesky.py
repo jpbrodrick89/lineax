@@ -17,7 +17,7 @@ from typing import Any, TypeAlias
 import jax.flatten_util as jfu
 import jax.numpy as jnp
 import jax.scipy as jsp
-from jaxtyping import Array, PyTree
+from jaxtyping import Array, ArrayLike, Bool, PyTree
 
 from .._operator import (
     AbstractLinearOperator,
@@ -29,7 +29,11 @@ from .._solution import RESULTS
 from .base import AbstractDirectLinearSolver
 
 
-_CholeskyState: TypeAlias = tuple[Array, Array]
+# `(factor, is_nsd)`. `is_nsd` is a Python bool when it is known statically. It is not
+# wrapped as a scalar array, as a scalar constant is inlined into a jaxpr as a literal,
+# so that under higher-order autodiff it would reach a transpose rule as a Python
+# bool after all -- and not as the array it was bound as.
+_CholeskyState: TypeAlias = tuple[Array, Bool[ArrayLike, ""]]
 
 
 class Cholesky(AbstractDirectLinearSolver[_CholeskyState]):
@@ -71,7 +75,7 @@ class Cholesky(AbstractDirectLinearSolver[_CholeskyState]):
         factor, lower = jsp.linalg.cho_factor(matrix)
         # Fix upper triangular for simplicity.
         assert lower is False
-        return factor, jnp.asarray(is_nsd_flag)
+        return factor, is_nsd_flag
 
     def compute(
         self, state: _CholeskyState, vector: PyTree[Array], options: dict[str, Any]
